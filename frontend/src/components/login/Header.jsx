@@ -24,10 +24,6 @@ export default function Header() {
 
       {/* Top Right Auth Nav */}
       <div className="flex items-center gap-1.5 sm:gap-4 text-xs sm:text-base md:text-lg font-bold tracking-wide shrink-0 whitespace-nowrap">
-        <Link to="/login" className="text-[#212B36] transition-colors cursor-pointer p-0.5 sm:p-1">
-          Sign In
-        </Link>
-        <span className="text-[#D0D7D1]">|</span>
         <Link to="/register" className="text-[#FF6A55] hover:text-[#e05642] transition-colors cursor-pointer p-0.5 sm:p-1">
           Sign Up
         </Link>

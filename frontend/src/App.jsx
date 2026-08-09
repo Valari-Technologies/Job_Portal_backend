@@ -2,6 +2,9 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from './components/login/LoginPage';
 import RegisterPage from './components/register/RegisterPage';
+import TermsAndConditions from './components/legal/TermsAndConditions';
+import PrivacyPolicy from './components/legal/PrivacyPolicy';
+import CandidateDashboard from './pages/CandidateDashboard';
 
 export default function App() {
   return (
@@ -13,7 +16,12 @@ export default function App() {
         {/* Render separate pages using clean route mapping */}
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
+        <Route path="/privacy-policy" element={<PrivacyPolicy />} />
+        <Route path="/dashboard" element={<CandidateDashboard />} />
+        <Route path="/dashboard/*" element={<CandidateDashboard />} />
       </Routes>
     </BrowserRouter>
   );
 }
+

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User, Mail, Phone, Lock, Eye, EyeOff, UserPlus } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import LegalModal from './LegalModal';
 
 export default function RegisterForm() {
   const [showPassword, setShowPassword] = useState(false);
@@ -11,6 +12,31 @@ export default function RegisterForm() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [agreeToTerms, setAgreeToTerms] = useState(false);
+  const [error, setError] = useState('');
+
+  // Modal State Management
+  const [isLegalModalOpen, setIsLegalModalOpen] = useState(false);
+  const [termsReviewed, setTermsReviewed] = useState(false);
+  const [privacyReviewed, setPrivacyReviewed] = useState(false);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+
+    if (!termsReviewed || !privacyReviewed) {
+      setError('Please review both Terms & Conditions and Privacy Policy before continuing.');
+      return;
+    }
+
+    if (!agreeToTerms) {
+      setError('You must accept the Terms & Conditions and Privacy Policy to continue.');
+      return;
+    }
+
+    setError('');
+    alert('Account created successfully!');
+  };
+
+  const isFormValid = termsReviewed && privacyReviewed && agreeToTerms;
 
   return (
     <div className="w-full max-w-[680px] mx-auto bg-white/90 md:bg-transparent backdrop-blur-md md:backdrop-blur-none p-6 sm:p-8 md:p-0 rounded-3xl shadow-xl md:shadow-none border border-white/60 md:border-none">
@@ -24,7 +50,7 @@ export default function RegisterForm() {
         </p>
       </div>
 
-      <form onSubmit={(e) => e.preventDefault()} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-5">
         {/* Row 1: Full Name & Email Address */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
@@ -126,38 +152,73 @@ export default function RegisterForm() {
           </div>
         </div>
 
-        {/* Terms and Conditions Checkbox */}
-        <div className="flex items-center gap-2 pt-1 select-none">
-          <input
-            type="checkbox"
-            id="terms"
-            checked={agreeToTerms}
-            onChange={(e) => setAgreeToTerms(e.target.checked)}
-            className="w-4 h-4 text-[#84A43C] border-[#E2E8F0] rounded-sm focus:ring-[#84A43C]/30 cursor-pointer"
-          />
-          <label htmlFor="terms" className="text-xs md:text-sm font-medium text-[#64748B] cursor-pointer">
-            I agree to the <span className="text-[#84A43C] font-semibold hover:underline">Terms & Conditions</span> and <span className="text-[#84A43C] font-semibold hover:underline">Privacy Policy</span>
-          </label>
+        {/* Terms and Conditions Checkbox Area */}
+        <div className="flex flex-col gap-1.5 pt-1 select-none">
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="terms"
+              checked={agreeToTerms}
+              disabled={!(termsReviewed && privacyReviewed)}
+              onChange={(e) => {
+                setAgreeToTerms(e.target.checked);
+                if (e.target.checked) setError('');
+              }}
+              className={`w-4 h-4 rounded-sm focus:ring-[#84A43C]/30 ${
+                (termsReviewed && privacyReviewed)
+                  ? 'text-[#84A43C] border-[#E2E8F0] cursor-pointer'
+                  : 'text-gray-300 border-gray-200 cursor-not-allowed opacity-50'
+              }`}
+              aria-describedby={error ? "terms-error" : undefined}
+            />
+            <label htmlFor="terms" className="text-xs md:text-sm font-medium text-[#64748B]">
+              I agree to the{' '}
+              <button
+                type="button"
+                onClick={() => setIsLegalModalOpen(true)}
+                className="text-[#84A43C] font-semibold hover:underline cursor-pointer focus:outline-none"
+              >
+                Terms & Conditions
+              </button>{' '}
+              and{' '}
+              <button
+                type="button"
+                onClick={() => setIsLegalModalOpen(true)}
+                className="text-[#84A43C] font-semibold hover:underline cursor-pointer focus:outline-none"
+              >
+                Privacy Policy
+              </button>
+            </label>
+          </div>
+
+          {/* Helper Message if legal agreements aren't reviewed yet */}
+          {!(termsReviewed && privacyReviewed) && (
+            <p className="text-xs text-amber-600 font-semibold mt-1">
+              Please review both Terms & Conditions and Privacy Policy before continuing.
+            </p>
+          )}
+
+          {/* Inline Validation Error Messages */}
+          {error && (
+            <p id="terms-error" className="text-xs font-bold text-red-500 mt-1" role="alert">
+              {error}
+            </p>
+          )}
         </div>
 
         {/* Buttons Action Area */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center pt-3">
+        <div className="pt-3">
           {/* CREATE ACCOUNT BUTTON */}
           <button
             type="submit"
-            className="flex items-center justify-center gap-2 w-full py-3.5 bg-[#84A43C] hover:bg-[#73922f] active:scale-[0.99] text-white font-bold text-sm md:text-base tracking-wider rounded-2xl shadow-lg shadow-[#84A43C]/30 transition-all duration-200 cursor-pointer"
+            className={`flex items-center justify-center gap-2 w-full py-3.5 font-bold text-sm md:text-base tracking-wider rounded-2xl shadow-lg transition-all duration-200 cursor-pointer ${
+              isFormValid
+                ? 'bg-[#84A43C] hover:bg-[#73922f] active:scale-[0.99] text-white shadow-[#84A43C]/30'
+                : 'bg-gray-300 text-gray-500 opacity-60'
+            }`}
           >
             <UserPlus className="w-5 h-5" />
             <span>Create Account</span>
-          </button>
-
-          {/* GOOGLE SIGN UP BUTTON */}
-          <button
-            type="button"
-            className="flex items-center justify-center gap-2.5 w-full py-3.5 bg-white border border-[#E2E8F0] hover:bg-gray-50 active:scale-[0.99] text-[#1E293B] font-bold text-sm rounded-2xl shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer"
-          >
-            <img src="/google-image.png" alt="Google" className="w-4.5 h-4.5 object-contain" />
-            <span>Continue with Google</span>
           </button>
         </div>
 
@@ -174,6 +235,16 @@ export default function RegisterForm() {
           </p>
         </div>
       </form>
+
+      {/* Combined Single Legal Agreements Modal */}
+      <LegalModal
+        isOpen={isLegalModalOpen}
+        onClose={() => setIsLegalModalOpen(false)}
+        termsReviewed={termsReviewed}
+        setTermsReviewed={setTermsReviewed}
+        privacyReviewed={privacyReviewed}
+        setPrivacyReviewed={setPrivacyReviewed}
+      />
     </div>
   );
 }

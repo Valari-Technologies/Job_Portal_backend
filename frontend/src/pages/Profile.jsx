@@ -8,9 +8,9 @@ export default function Profile() {
   const photoInputRef = useRef(null);
 
   // Resume States
-  const [resumeName, setResumeName] = useState('Riya_Resume.pdf');
-  const [resumeSize, setResumeSize] = useState('2.4 MB');
-  const [resumeData, setResumeData] = useState('dummy'); 
+  const [resumeName, setResumeName] = useState('');
+  const [resumeSize, setResumeSize] = useState('');
+  const [resumeData, setResumeData] = useState(''); 
   const [resumeError, setResumeError] = useState('');
   const resumeInputRef = useRef(null);
 
@@ -20,65 +20,31 @@ export default function Profile() {
   // Personal Info edit states
   const [isEditingInfo, setIsEditingInfo] = useState(false);
   const [personalInfo, setPersonalInfo] = useState({
-    fullName: 'Mohamed Thoufiq',
-    email: 'thoufiq@example.com',
-    phone: '+91 98765 43210',
-    dob: '12 May 2001',
-    gender: 'Male',
-    address: '123, 4th Cross, HSR Layout',
-    city: 'Bengaluru',
-    state: 'Karnataka'
+    fullName: '',
+    email: '',
+    phone: '',
+    dob: '',
+    gender: '',
+    address: '',
+    city: '',
+    state: ''
   });
   const [infoForm, setInfoForm] = useState({ ...personalInfo });
 
   // Education edit states
   const [isEditingEdu, setIsEditingEdu] = useState(false);
-  const [educationList, setEducationList] = useState([
-    { id: 1, examName: 'Engineering Entrance', board: 'Karnataka CET', year: '2020', result: '92.4%' },
-    { id: 2, examName: '12th Standard (PCM)', board: 'Karnataka Board', year: '2018', result: '88.6%' },
-    { id: 3, examName: '10th Standard', board: 'Karnataka Board', year: '2016', result: '91.2%' }
-  ]);
-  const [eduFormList, setEduFormList] = useState([...educationList]);
+  const [educationList, setEducationList] = useState([]);
+  const [eduFormList, setEduFormList] = useState([]);
 
   // Experience edit states
   const [isEditingExp, setIsEditingExp] = useState(false);
-  const [experienceList, setExperienceList] = useState([
-    {
-      id: 1,
-      role: 'Software Developer Intern',
-      company: 'ABC Tech Solutions, Bangalore',
-      duration: 'Jun 2023 - Dec 2023',
-      highlights: [
-        'Worked on developing responsive web applications.',
-        'Collaborated with the team to optimize performance.',
-        'Gained experience in React, Node.js, and MongoDB.'
-      ]
-    },
-    {
-      id: 2,
-      role: 'Web Developer Intern',
-      company: 'XYZ Innovations, Bangalore',
-      duration: 'Jan 2023 - May 2023',
-      highlights: [
-        'Assisted in building and maintaining client websites.',
-        'Improved UI/UX and fixed bugs.',
-        'Worked with HTML, CSS, JavaScript.'
-      ]
-    }
-  ]);
-  const [expFormList, setExpFormList] = useState([...experienceList]);
+  const [experienceList, setExperienceList] = useState([]);
+  const [expFormList, setExpFormList] = useState([]);
 
   // Skills states with levels (Beginner, Intermediate, Advanced)
   const [isEditingSkills, setIsEditingSkills] = useState(false);
-  const [skillsList, setSkillsList] = useState([
-    { id: 1, name: 'JavaScript', level: 'Advanced' },
-    { id: 2, name: 'React.js', level: 'Advanced' },
-    { id: 3, name: 'Node.js', level: 'Beginner' },
-    { id: 4, name: 'Python', level: 'Intermediate' },
-    { id: 5, name: 'SQL', level: 'Intermediate' },
-    { id: 6, name: 'HTML & CSS', level: 'Advanced' }
-  ]);
-  const [skillsFormList, setSkillsFormList] = useState([...skillsList]);
+  const [skillsList, setSkillsList] = useState([]);
+  const [skillsFormList, setSkillsFormList] = useState([]);
 
   // Certifications states
   const [certifications, setCertifications] = useState([]);
@@ -106,73 +72,87 @@ export default function Profile() {
     window.dispatchEvent(new Event('profileUpdate'));
   };
 
+  // Helper function to save to consolidated profile object
+  const saveCandidateProfile = (updatedFields) => {
+    const current = JSON.parse(localStorage.getItem('candidateProfile') || '{}');
+    const merged = { ...current, ...updatedFields };
+    localStorage.setItem('candidateProfile', JSON.stringify(merged));
+    triggerHeaderSync();
+  };
+
   // Load state from localStorage on mount
   useEffect(() => {
-    // Photo
-    const savedImage = localStorage.getItem('profileImage');
-    if (savedImage) setProfileImage(savedImage);
-
-    // Resume
-    const savedResumeName = localStorage.getItem('resumeName');
-    const savedResumeSize = localStorage.getItem('resumeSize');
-    const savedResumeData = localStorage.getItem('resumeData');
-    if (savedResumeData) {
-      setResumeName(savedResumeName || 'Riya_Resume.pdf');
-      setResumeSize(savedResumeSize || '2.4 MB');
-      setResumeData(savedResumeData);
+    let profile = null;
+    const stored = localStorage.getItem('candidateProfile');
+    if (stored) {
+      profile = JSON.parse(stored);
+    } else {
+      const auth = JSON.parse(localStorage.getItem('candidateAuth') || '{}');
+      profile = {
+        fullName: auth.fullName || 'Mohamed Thoufiq',
+        email: auth.email || 'thoufiq@example.com',
+        phone: '',
+        dob: '',
+        gender: '',
+        address: '',
+        city: '',
+        state: '',
+        education: [],
+        experience: [],
+        skills: [],
+        certifications: [],
+        resumeName: '',
+        resumeSize: '',
+        resumeData: '',
+        profileImage: ''
+      };
+      localStorage.setItem('candidateProfile', JSON.stringify(profile));
+      triggerHeaderSync();
     }
 
-    // Personal Info
-    const savedInfo = localStorage.getItem('personalInfo');
-    if (savedInfo) {
-      const parsed = JSON.parse(savedInfo);
-      setPersonalInfo(parsed);
-      setInfoForm(parsed);
-    }
+    if (profile) {
+      setProfileImage(profile.profileImage || null);
+      setResumeName(profile.resumeName || '');
+      setResumeSize(profile.resumeSize || '');
+      setResumeData(profile.resumeData || '');
+      
+      const pInfo = {
+        fullName: profile.fullName || '',
+        email: profile.email || '',
+        phone: profile.phone || '',
+        dob: profile.dob || '',
+        gender: profile.gender || '',
+        address: profile.address || '',
+        city: profile.city || '',
+        state: profile.state || ''
+      };
+      setPersonalInfo(pInfo);
+      setInfoForm(pInfo);
 
-    // Education
-    const savedEdu = localStorage.getItem('educationList');
-    if (savedEdu) {
-      const parsed = JSON.parse(savedEdu);
-      setEducationList(parsed);
-      setEduFormList(parsed);
-    }
-
-    // Experience
-    const savedExp = localStorage.getItem('experienceList');
-    if (savedExp) {
-      const parsed = JSON.parse(savedExp);
-      setExperienceList(parsed);
-      setExpFormList(parsed);
-    }
-
-    // Skills
-    const savedSkills = localStorage.getItem('skillsList');
-    if (savedSkills) {
-      const parsed = JSON.parse(savedSkills);
-      setSkillsList(parsed);
-      setSkillsFormList(parsed);
-    }
-
-    // Certifications
-    const savedCerts = localStorage.getItem('certifications');
-    if (savedCerts) {
-      setCertifications(JSON.parse(savedCerts));
+      setEducationList(profile.education || []);
+      setEduFormList(profile.education || []);
+      setExperienceList(profile.experience || []);
+      setExpFormList(profile.experience || []);
+      setSkillsList(profile.skills || []);
+      setSkillsFormList(profile.skills || []);
+      setCertifications(profile.certifications || []);
     }
   }, []);
 
   // Compute dynamic Profile Completion Percentage based on weights:
-  // - Personal Info = 25% (Considered complete if fullName is filled)
+  // - Personal Info = 25% (Considered complete if fullName, email, phone are filled)
   // - Experience = 20%
   // - Skills = 20%
   // - Resume = 20%
   // - Certifications = 15%
   const calculateCompletion = () => {
     let score = 0;
-    if (personalInfo.fullName && personalInfo.fullName.trim() !== '') score += 25;
+    if (personalInfo.fullName && personalInfo.fullName.trim() !== '') score += 10;
+    if (personalInfo.email && personalInfo.email.trim() !== '') score += 10;
+    if (personalInfo.phone && personalInfo.phone.trim() !== '') score += 5;
     if (experienceList.length > 0) score += 20;
     if (skillsList.length > 0) score += 20;
-    if (resumeData && resumeData !== 'dummy') score += 20;
+    if (resumeData && resumeData !== '') score += 20;
     if (certifications.length > 0) score += 15;
     return score;
   };
@@ -187,7 +167,7 @@ export default function Profile() {
   if (skillsList.length === 0) {
     missingItems.push({ id: 'skills', label: 'Add Skills', tab: 'Skills' });
   }
-  if (!resumeData || resumeData === 'dummy') {
+  if (!resumeData || resumeData === '') {
     missingItems.push({ id: 'resume', label: 'Upload Resume', isResume: true });
   }
   if (certifications.length === 0) {
@@ -227,8 +207,7 @@ export default function Profile() {
     reader.onloadend = () => {
       const base64Data = reader.result;
       setProfileImage(base64Data);
-      localStorage.setItem('profileImage', base64Data);
-      triggerHeaderSync();
+      saveCandidateProfile({ profileImage: base64Data });
     };
     reader.readAsDataURL(file);
   };
@@ -255,15 +234,17 @@ export default function Profile() {
       setResumeName(file.name);
       setResumeSize(sizeString);
       setResumeData(base64Data);
-      localStorage.setItem('resumeName', file.name);
-      localStorage.setItem('resumeSize', sizeString);
-      localStorage.setItem('resumeData', base64Data);
+      saveCandidateProfile({
+        resumeName: file.name,
+        resumeSize: sizeString,
+        resumeData: base64Data
+      });
     };
     reader.readAsDataURL(file);
   };
 
   const handleDownloadResume = () => {
-    if (!resumeData || resumeData === 'dummy') return;
+    if (!resumeData) return;
     const link = document.createElement('a');
     link.href = resumeData;
     link.download = resumeName;
@@ -284,29 +265,28 @@ export default function Profile() {
   const handleInfoSave = (e) => {
     e.preventDefault();
     setPersonalInfo({ ...infoForm });
-    localStorage.setItem('personalInfo', JSON.stringify(infoForm));
+    saveCandidateProfile(infoForm);
     setIsEditingInfo(false);
-    triggerHeaderSync();
   };
 
   const handleEduSave = (e) => {
     e.preventDefault();
     setEducationList([...eduFormList]);
-    localStorage.setItem('educationList', JSON.stringify(eduFormList));
+    saveCandidateProfile({ education: eduFormList });
     setIsEditingEdu(false);
   };
 
   const handleExpSave = (e) => {
     e.preventDefault();
     setExperienceList([...expFormList]);
-    localStorage.setItem('experienceList', JSON.stringify(expFormList));
+    saveCandidateProfile({ experience: expFormList });
     setIsEditingExp(false);
   };
 
   const handleSkillsSave = (e) => {
     e.preventDefault();
     setSkillsList([...skillsFormList]);
-    localStorage.setItem('skillsList', JSON.stringify(skillsFormList));
+    saveCandidateProfile({ skills: skillsFormList });
     setIsEditingSkills(false);
   };
 
@@ -628,13 +608,13 @@ export default function Profile() {
       <div className="bg-white rounded-[32px] border border-slate-100 shadow-xs overflow-hidden w-full">
         
         {/* Tab navigation */}
-        <div className="flex border-b border-slate-100 gap-8 text-sm sm:text-base font-bold select-none px-6 pt-5">
+        <div className="flex border-b border-slate-100 gap-8 text-sm sm:text-base font-bold select-none px-6 pt-5 overflow-x-auto scrollbar-none whitespace-nowrap">
           {['Personal Info', 'Education', 'Experience', 'Skills', 'Certifications'].map((tab) => (
             <button
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`pb-4 transition-all border-b-[3px] cursor-pointer focus:outline-none ${
+              className={`pb-4 transition-all border-b-[3px] cursor-pointer focus:outline-none whitespace-nowrap ${
                 activeTab === tab
                   ? 'border-[#4A7318] text-[#4A7318] font-extrabold'
                   : 'border-transparent text-slate-800 hover:text-slate-900'

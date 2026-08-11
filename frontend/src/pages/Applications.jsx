@@ -267,13 +267,13 @@ export default function Applications() {
             </div>
 
             {/* Sub Navigation tabs */}
-            <div className="flex border-b border-slate-100 gap-6 text-sm font-extrabold mt-6 overflow-x-auto pb-px">
+            <div className="flex border-b border-slate-100 gap-6 text-sm font-extrabold mt-6 overflow-x-auto scrollbar-none whitespace-nowrap">
               {['Overview', 'Timeline', 'Documents', 'Notes'].map((subTab) => (
                 <button
                   key={subTab}
                   type="button"
                   onClick={() => setActiveSubTab(subTab)}
-                  className={`pb-2.5 transition-all border-b-2 cursor-pointer ${
+                  className={`pb-2.5 transition-all border-b-2 cursor-pointer whitespace-nowrap ${
                     activeSubTab === subTab
                       ? 'border-[#84A43C] text-[#84A43C]'
                       : 'border-transparent text-slate-400 hover:text-slate-600'

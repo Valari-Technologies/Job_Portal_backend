@@ -5,6 +5,7 @@ import RegisterPage from './components/register/RegisterPage';
 import TermsAndConditions from './components/legal/TermsAndConditions';
 import PrivacyPolicy from './components/legal/PrivacyPolicy';
 import CandidateDashboard from './pages/CandidateDashboard';
+import HrDashboard from './pages/HrDashboard';
 
 export default function App() {
   return (
@@ -20,6 +21,8 @@ export default function App() {
         <Route path="/privacy-policy" element={<PrivacyPolicy />} />
         <Route path="/dashboard" element={<CandidateDashboard />} />
         <Route path="/dashboard/*" element={<CandidateDashboard />} />
+        <Route path="/hr-dashboard" element={<HrDashboard />} />
+        <Route path="/hr-dashboard/*" element={<HrDashboard />} />
       </Routes>
     </BrowserRouter>
   );

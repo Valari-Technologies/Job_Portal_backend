@@ -14,6 +14,7 @@ export default function TopNavbar() {
   // Profile Synchronization State (syncs in real-time with Profile.jsx via window event)
   const [fullName, setFullName] = useState('Riya Mohan');
   const [profileImage, setProfileImage] = useState(null);
+  const [designation, setDesignation] = useState('Candidate');
 
   // Notifications State
   const [notifications, setNotifications] = useState([
@@ -28,13 +29,16 @@ export default function TopNavbar() {
 
   // Load profile sync values and setup custom event listener
   const syncProfile = () => {
-    const savedImage = localStorage.getItem('profileImage');
-    if (savedImage) setProfileImage(savedImage);
-
-    const savedInfo = localStorage.getItem('personalInfo');
-    if (savedInfo) {
-      const parsed = JSON.parse(savedInfo);
+    const stored = localStorage.getItem('candidateProfile');
+    if (stored) {
+      const parsed = JSON.parse(stored);
       if (parsed.fullName) setFullName(parsed.fullName);
+      if (parsed.profileImage) setProfileImage(parsed.profileImage);
+      if (parsed.designation) {
+        setDesignation(parsed.designation);
+      } else {
+        setDesignation('Candidate');
+      }
     }
   };
 
@@ -103,11 +107,11 @@ export default function TopNavbar() {
   return (
     <header className="w-full flex items-center justify-between py-4 px-2 sm:px-6 md:px-8 select-none z-30 relative">
       {/* Middle Top Navigation Tab bar */}
-      <nav className="flex items-center gap-1 sm:gap-2 md:gap-4 bg-white/50 backdrop-blur-xs p-1.5 rounded-full border border-white/40 shadow-xs">
+      <nav className="flex items-center gap-1 sm:gap-2 bg-white/50 backdrop-blur-xs p-1.5 rounded-full border border-white/40 shadow-xs overflow-x-auto max-w-[200px] min-[375px]:max-w-[240px] min-[425px]:max-w-[280px] sm:max-w-md md:max-w-none whitespace-nowrap scrollbar-none">
         <NavLink
           to="/dashboard"
           className={
-            `px-3 sm:px-5 py-2 text-xs sm:text-sm font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
+            `px-3 sm:px-5 py-2 text-base font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
               currentPath === '/dashboard'
                 ? 'bg-[#84A43C] text-white shadow-md shadow-[#84A43C]/20' 
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -119,7 +123,7 @@ export default function TopNavbar() {
         <NavLink
           to="/dashboard/jobs"
           className={({ isActive }) =>
-            `px-3 sm:px-5 py-2 text-xs sm:text-sm font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
+            `px-3 sm:px-5 py-2 text-base font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
               isActive 
                 ? 'bg-[#84A43C] text-white shadow-md shadow-[#84A43C]/20' 
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -131,7 +135,7 @@ export default function TopNavbar() {
         <NavLink
           to="/dashboard/applications"
           className={({ isActive }) =>
-            `px-3 sm:px-5 py-2 text-xs sm:text-sm font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
+            `px-3 sm:px-5 py-2 text-base font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
               isActive 
                 ? 'bg-[#84A43C] text-white shadow-md shadow-[#84A43C]/20' 
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -143,7 +147,7 @@ export default function TopNavbar() {
         <NavLink
           to="/dashboard/profile"
           className={({ isActive }) =>
-            `px-3 sm:px-5 py-2 text-xs sm:text-sm font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
+            `px-3 sm:px-5 py-2 text-base font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
               isActive 
                 ? 'bg-[#84A43C] text-white shadow-md shadow-[#84A43C]/20' 
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -155,7 +159,7 @@ export default function TopNavbar() {
         <NavLink
           to="/dashboard/settings"
           className={({ isActive }) =>
-            `px-3 sm:px-5 py-2 text-xs sm:text-sm font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
+            `px-3 sm:px-5 py-2 text-base font-extrabold rounded-full transition-all duration-200 cursor-pointer ${
               isActive 
                 ? 'bg-[#84A43C] text-white shadow-md shadow-[#84A43C]/20' 
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -242,8 +246,8 @@ export default function TopNavbar() {
               )}
             </div>
             <div className="hidden sm:block text-left">
-              <p className="text-xs sm:text-sm font-extrabold text-slate-800 leading-tight">{fullName}</p>
-              <p className="text-[10px] sm:text-xs font-semibold text-slate-400">Candidate</p>
+              <p className="text-sm sm:text-base font-extrabold text-slate-800 leading-tight">{fullName}</p>
+              <p className="text-xs sm:text-sm font-semibold text-slate-400">{designation}</p>
             </div>
             <ChevronDown className={`w-4 h-4 text-slate-400 hidden sm:block transition-transform duration-200 ${
               isProfileOpen ? 'rotate-180' : ''

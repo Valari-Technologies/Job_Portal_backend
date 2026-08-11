@@ -1,10 +1,76 @@
 import React, { useState } from 'react';
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 
 export default function LoginForm() {
+  const navigate = useNavigate();
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const isHr = email.toLowerCase().includes('hr');
+    if (isHr) {
+      // HR Auth
+      const hrAuth = JSON.parse(localStorage.getItem('hrAuth') || '{}');
+      const finalName = hrAuth.fullName || 'HR Manager';
+      const finalEmail = email || hrAuth.email || 'hr.manager@company.com';
+
+      // Initialize hrProfile if not exists
+      let hrProfile = localStorage.getItem('hrProfile');
+      if (!hrProfile) {
+        const newProfile = {
+          fullName: finalName,
+          email: finalEmail,
+          phone: '',
+          designation: '',
+          department: '',
+          image: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150',
+          orgName: '',
+          website: '',
+          companySize: '',
+          industry: '',
+          headquarters: '',
+          workModel: ''
+        };
+        localStorage.setItem('hrProfile', JSON.stringify(newProfile));
+        window.dispatchEvent(new Event('hr_profile_updated'));
+      }
+      navigate('/hr-dashboard');
+    } else {
+      // Candidate Auth
+      const candidateAuth = JSON.parse(localStorage.getItem('candidateAuth') || '{}');
+      const finalName = candidateAuth.fullName || 'Mohamed Thoufiq';
+      const finalEmail = email || candidateAuth.email || 'thoufiq@example.com';
+
+      // Initialize candidateProfile if not exists
+      let candidateProfile = localStorage.getItem('candidateProfile');
+      if (!candidateProfile) {
+        const newProfile = {
+          fullName: finalName,
+          email: finalEmail,
+          phone: '',
+          dob: '',
+          gender: '',
+          address: '',
+          city: '',
+          state: '',
+          education: [],
+          experience: [],
+          skills: [],
+          certifications: [],
+          resumeName: '',
+          resumeSize: '',
+          resumeData: '',
+          profileImage: ''
+        };
+        localStorage.setItem('candidateProfile', JSON.stringify(newProfile));
+        window.dispatchEvent(new Event('profileUpdate'));
+      }
+      navigate('/dashboard');
+    }
+  };
 
   return (
     <div className="w-full max-w-[440px] mx-auto md:mx-0 p-2 sm:p-4 md:p-0 md:bg-transparent rounded-3xl md:rounded-none">
@@ -18,7 +84,7 @@ export default function LoginForm() {
         </h1>
       </div>
 
-      <form onSubmit={(e) => e.preventDefault()} className="space-y-4 sm:space-y-5 flex flex-col items-center">
+      <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-5 flex flex-col items-center">
         {/* EMAIL FIELD */}
         <div className="w-full">
           <label className="block text-xs sm:text-xs md:text-sm font-bold text-[#64748B] tracking-wider uppercase mb-1.5">

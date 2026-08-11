@@ -110,7 +110,7 @@ export default function Sidebar() {
   const iconOffset = (size.width * PINCH_RATIO) / 2;
 
   return (
-    <div className="w-16 md:w-18 min-h-[96vh] flex flex-col items-center select-none shrink-0 relative z-25">
+    <div className="hidden md:flex w-16 md:w-18 min-h-[96vh] flex-col items-center select-none shrink-0 relative z-25">
 
       <img src={logoJobz} alt="Branding Logo" className="w-12 h-12 md:w-14 md:h-14 object-contain mt-3.5 mb-4 cursor-pointer hover:opacity-90 transition-opacity shrink-0" />
 

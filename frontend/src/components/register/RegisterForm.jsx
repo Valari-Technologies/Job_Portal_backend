@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { User, Mail, Phone, Lock, Eye, EyeOff, UserPlus } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import LegalModal from './LegalModal';
 
 export default function RegisterForm() {
@@ -18,6 +18,7 @@ export default function RegisterForm() {
   const [isLegalModalOpen, setIsLegalModalOpen] = useState(false);
   const [termsReviewed, setTermsReviewed] = useState(false);
   const [privacyReviewed, setPrivacyReviewed] = useState(false);
+  const navigate = useNavigate();
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -33,7 +34,19 @@ export default function RegisterForm() {
     }
 
     setError('');
-    alert('Account created successfully!');
+    const isHr = email.toLowerCase().includes('hr');
+    if (isHr) {
+      const authData = { fullName, email, password };
+      localStorage.setItem('hrAuth', JSON.stringify(authData));
+      localStorage.removeItem('hrProfile'); // force profile refresh
+      alert('HR Account created successfully!');
+    } else {
+      const authData = { fullName, email, password };
+      localStorage.setItem('candidateAuth', JSON.stringify(authData));
+      localStorage.removeItem('candidateProfile'); // force profile refresh
+      alert('Candidate Account created successfully!');
+    }
+    navigate('/login');
   };
 
   const isFormValid = termsReviewed && privacyReviewed && agreeToTerms;

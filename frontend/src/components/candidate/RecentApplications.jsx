@@ -19,8 +19,8 @@ export default function RecentApplications() {
         </button>
       </div>
 
-      {/* Table Area */}
-      <div className="overflow-x-auto w-full">
+      {/* Desktop Table View */}
+      <div className="hidden md:block overflow-x-auto w-full">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-[#84A43C]/5 border-b border-slate-100">
@@ -55,6 +55,35 @@ export default function RecentApplications() {
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* Mobile Card View */}
+      <div className="block md:hidden flex flex-col divide-y divide-slate-100">
+        {applications.map((app) => {
+          let badgeStyle = '';
+          if (app.status === 'Under Review') {
+            badgeStyle = 'bg-amber-100 text-amber-800 border border-amber-200';
+          } else if (app.status === 'Applied') {
+            badgeStyle = 'bg-blue-100 text-blue-800 border border-blue-200';
+          } else if (app.status === 'Rejected') {
+            badgeStyle = 'bg-rose-100 text-rose-800 border border-rose-200';
+          }
+
+          return (
+            <div key={app.id} className="py-4 flex flex-col gap-2 text-left">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-bold text-slate-700">{app.jobName}</span>
+                <span className={`px-2.5 py-0.5 text-xs font-bold rounded-full ${badgeStyle}`}>
+                  {app.status}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-slate-400 font-medium mt-1">
+                <span>Applied Date</span>
+                <span>{app.appliedDate}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
     </div>

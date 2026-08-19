@@ -65,6 +65,77 @@ class Department(models.Model):
         return self.name
 
 
+class Location(models.Model):
+    class LocationType(models.TextChoices):
+        STATE_DISTRICT = "STATE_DISTRICT", "State District"
+        CITY = "CITY", "City"
+        LOCALITY = "LOCALITY", "Locality"
+
+    name = models.CharField(max_length=100)
+    location_type = models.CharField(
+        max_length=50,
+        choices=LocationType.choices,
+        default=LocationType.CITY
+    )
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="children"
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class JobCategory(models.Model):
+    name = models.CharField(max_length=100)
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="children"
+    )
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = 'job categories'
+
+    def __str__(self):
+        return self.name
+
+
+class WorkMode(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.CharField(max_length=255, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
+class EmploymentType(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.CharField(max_length=255, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+
 class CustomUserManager(UserManager):
     def create_superuser(self, username, email=None, password=None, **extra_fields):
         extra_fields.setdefault('role', 'ADMIN')
@@ -108,6 +179,22 @@ class User(AbstractUser):
         max_length=255,
         blank=True,
         null=True
+    )
+
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        INACTIVE = "INACTIVE", "Inactive"
+        SUSPENDED = "SUSPENDED", "Suspended"
+        DELETED = "DELETED", "Deleted"
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE
+    )
+
+    is_mobile_verified = models.BooleanField(
+        default=False
     )
 
     created_at = models.DateTimeField(
@@ -155,6 +242,78 @@ class CandidateProfile(models.Model):
     profile_completed = models.BooleanField(
         default=False
     )
+    dob = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    gender = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    address = models.TextField(
+        blank=True,
+        null=True
+    )
+    city = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    state = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    full_name = models.CharField(
+        max_length=150,
+        blank=True,
+        null=True
+    )
+    profile_photo = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True
+    )
+    date_of_birth = models.DateField(
+        blank=True,
+        null=True
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='candidates'
+    )
+    expected_salary_min = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True
+    )
+    expected_salary_max = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True
+    )
+    preferred_job_type = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    preferred_work_mode = models.ForeignKey(
+        WorkMode,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='candidates'
+    )
+    profile_completion = models.IntegerField(
+        default=0
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )
@@ -184,6 +343,25 @@ class Education(models.Model):
     graduation_year = models.IntegerField()
     cgpa = models.CharField(
         max_length=20,
+        blank=True,
+        null=True
+    )
+    education_level = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    qualification = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    institution = models.CharField(
+        max_length=150,
+        blank=True,
+        null=True
+    )
+    year_completed = models.IntegerField(
         blank=True,
         null=True
     )
@@ -219,6 +397,24 @@ class Experience(models.Model):
         blank=True,
         null=True
     )
+    job_title = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    company_name = models.CharField(
+        max_length=150,
+        blank=True,
+        null=True
+    )
+    experience_type = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    is_current = models.BooleanField(
+        default=False
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )
@@ -247,6 +443,11 @@ class Resume(models.Model):
     )
     is_default = models.BooleanField(
         default=False
+    )
+    file_url = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True
     )
     uploaded_at = models.DateTimeField(
         auto_now_add=True
@@ -298,6 +499,15 @@ class CandidateSkill(models.Model):
         max_length=20,
         choices=Proficiency.choices,
         default=Proficiency.BEGINNER
+    )
+    proficiency = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    years_experience = models.IntegerField(
+        blank=True,
+        null=True
     )
     created_at = models.DateTimeField(
         auto_now_add=True
@@ -361,6 +571,41 @@ class HRProfile(models.Model):
         blank=True,
         null=True
     )
+    company_description = models.TextField(
+        blank=True,
+        null=True
+    )
+    company_logo = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True
+    )
+    company_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True
+    )
+    company_email = models.EmailField(
+        blank=True,
+        null=True
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='employers'
+    )
+    verification_status = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    trust_level = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )
@@ -414,6 +659,62 @@ class Job(models.Model):
         choices=Status.choices,
         default=Status.DRAFT
     )
+    category = models.ForeignKey(
+        JobCategory,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="jobs"
+    )
+    responsibilities = models.TextField(
+        blank=True,
+        null=True
+    )
+    education_requirement = models.TextField(
+        blank=True,
+        null=True
+    )
+    experience_min = models.IntegerField(
+        blank=True,
+        null=True
+    )
+    experience_max = models.IntegerField(
+        blank=True,
+        null=True
+    )
+    salary_min = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True
+    )
+    salary_max = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        blank=True,
+        null=True
+    )
+    salary_period = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    work_mode = models.ForeignKey(
+        WorkMode,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="jobs"
+    )
+    application_type = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+    application_deadline = models.DateField(
+        blank=True,
+        null=True
+    )
     published_at = models.DateTimeField(
         blank=True,
         null=True
@@ -446,6 +747,9 @@ class JobSkill(models.Model):
         Skill,
         on_delete=models.CASCADE,
         related_name="job_skills"
+    )
+    is_required = models.BooleanField(
+        default=False
     )
     created_at = models.DateTimeField(
         auto_now_add=True
@@ -496,6 +800,18 @@ class Application(models.Model):
         null=True
     )
     remarks = models.TextField(
+        blank=True,
+        null=True
+    )
+    resume = models.ForeignKey(
+        Resume,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="applications"
+    )
+    application_type = models.CharField(
+        max_length=50,
         blank=True,
         null=True
     )
@@ -554,6 +870,271 @@ class ApplicationActivity(models.Model):
 
     def __str__(self):
         return f"{self.action} on application #{self.application_id}"
+
+
+class UserRole(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_roles")
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name="user_roles")
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'role'],
+                name='unique_user_role'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.role.name}"
+
+
+class EmployerVerification(models.Model):
+    class VerificationStatus(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+        SUSPENDED = "SUSPENDED", "Suspended"
+
+    employer = models.ForeignKey(HRProfile, on_delete=models.CASCADE, related_name="verifications")
+    verification_status = models.CharField(
+        max_length=50,
+        choices=VerificationStatus.choices,
+        default=VerificationStatus.PENDING
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(blank=True, null=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name="reviewed_verifications")
+    rejection_reason = models.TextField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"Verification for {self.employer.company_name} - {self.verification_status}"
+
+
+class EmployerTrust(models.Model):
+    class TrustLevel(models.TextChoices):
+        NEW = "NEW", "New"
+        BASIC = "BASIC", "Basic"
+        TRUSTED = "TRUSTED", "Trusted"
+        HIGH = "HIGH", "High"
+
+    employer = models.OneToOneField(HRProfile, on_delete=models.CASCADE, related_name="trust")
+    trust_level = models.CharField(
+        max_length=50,
+        choices=TrustLevel.choices,
+        default=TrustLevel.NEW
+    )
+    jobs_posted = models.IntegerField(default=0)
+    jobs_approved = models.IntegerField(default=0)
+    jobs_rejected = models.IntegerField(default=0)
+    trust_score = models.IntegerField(default=0)
+    is_trusted = models.BooleanField(default=False)
+    trusted_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Trust Profile for {self.employer.company_name} - {self.trust_level}"
+
+
+class JobLocation(models.Model):
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="job_locations")
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name="job_locations")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['job', 'location'],
+                name='unique_job_location'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.job.title} in {self.location.name}"
+
+
+class JobEmploymentType(models.Model):
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="job_employment_types")
+    employment_type = models.ForeignKey(EmploymentType, on_delete=models.CASCADE, related_name="job_employment_types")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['job', 'employment_type'],
+                name='unique_job_employment_type'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.job.title} - {self.employment_type.name}"
+
+
+class ApplicationStatusHistory(models.Model):
+    application = models.ForeignKey(Application, on_delete=models.CASCADE, related_name="status_history")
+    status = models.CharField(max_length=50)
+    changed_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name="changed_application_statuses")
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'application status histories'
+
+    def __str__(self):
+        return f"History for app #{self.application_id} - {self.status}"
+
+
+class Interview(models.Model):
+    class InterviewType(models.TextChoices):
+        IN_PERSON = "IN_PERSON", "In Person"
+        ONLINE = "ONLINE", "Online"
+        PHONE = "PHONE", "Phone"
+
+    class Status(models.TextChoices):
+        SCHEDULED = "SCHEDULED", "Scheduled"
+        RESCHEDULED = "RESCHEDULED", "Rescheduled"
+        COMPLETED = "COMPLETED", "Completed"
+        CANCELLED = "CANCELLED", "Cancelled"
+        NO_SHOW = "NO_SHOW", "No Show"
+
+    class Result(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        SELECTED = "SELECTED", "Selected"
+        REJECTED = "REJECTED", "Rejected"
+
+    application = models.ForeignKey(Application, on_delete=models.CASCADE, related_name="interviews")
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="interviews")
+    scheduled_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name="scheduled_interviews")
+    interview_type = models.CharField(max_length=50, choices=InterviewType.choices, default=InterviewType.ONLINE)
+    scheduled_date = models.DateField()
+    scheduled_time = models.TimeField()
+    location = models.CharField(max_length=255, blank=True, null=True)
+    meeting_link = models.CharField(max_length=255, blank=True, null=True)
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=50, choices=Status.choices, default=Status.SCHEDULED)
+    result = models.CharField(max_length=50, choices=Result.choices, default=Result.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Interview for Application #{self.application_id} - {self.status}"
+
+
+class ApplicationMessage(models.Model):
+    application = models.ForeignKey(Application, on_delete=models.CASCADE, related_name="messages")
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="sent_messages")
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Message by {self.sender.username} on app #{self.application_id}"
+
+
+class Notification(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
+    notification_type = models.CharField(max_length=100)
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    reference_type = models.CharField(max_length=100, blank=True, null=True)
+    reference_id = models.BigIntegerField(blank=True, null=True)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Notification for {self.user.username} - {self.title}"
+
+
+class JobReport(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        REVIEWED = "REVIEWED", "Reviewed"
+        REJECTED = "REJECTED", "Rejected"
+
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="reports")
+    reported_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name="submitted_reports")
+    reason = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=50, choices=Status.choices, default=Status.PENDING)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name="reviewed_job_reports")
+    reviewed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Report on Job #{self.job_id} by {self.reported_by.username}"
+
+
+class JobReview(models.Model):
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="reviews")
+    reviewer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="job_reviews")
+    action = models.CharField(max_length=100)
+    reason = models.CharField(max_length=255, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Review on Job #{self.job_id} by {self.reviewer.username}"
+
+
+class SavedJob(models.Model):
+    candidate = models.ForeignKey(CandidateProfile, on_delete=models.CASCADE, related_name="saved_jobs")
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="saved_jobs")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['candidate', 'job'],
+                name='unique_saved_job'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.candidate.user.username} saved {self.job.title}"
+
+
+class JobRecommendation(models.Model):
+    candidate = models.ForeignKey(CandidateProfile, on_delete=models.CASCADE, related_name="recommendations")
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="recommendations")
+    score = models.DecimalField(max_digits=5, decimal_places=2)
+    reason = models.CharField(max_length=255, blank=True, null=True)
+    generated_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['candidate', 'job'],
+                name='unique_job_recommendation'
+            )
+        ]
+
+    def __str__(self):
+        return f"Recommendation for {self.candidate.user.username} - Job #{self.job_id}"
+
+
+class CandidateActivity(models.Model):
+    class ActivityType(models.TextChoices):
+        SEARCH = "SEARCH", "Search"
+        VIEW_JOB = "VIEW_JOB", "View Job"
+        SAVE_JOB = "SAVE_JOB", "Save Job"
+        APPLY_JOB = "APPLY_JOB", "Apply Job"
+        VIEW_CATEGORY = "VIEW_CATEGORY", "View Category"
+
+    candidate = models.ForeignKey(CandidateProfile, on_delete=models.CASCADE, related_name="activities")
+    activity_type = models.CharField(max_length=50, choices=ActivityType.choices)
+    job = models.ForeignKey(Job, on_delete=models.SET_NULL, blank=True, null=True, related_name="candidate_activities")
+    category = models.ForeignKey(JobCategory, on_delete=models.SET_NULL, blank=True, null=True, related_name="candidate_activities")
+    skill = models.ForeignKey(Skill, on_delete=models.SET_NULL, blank=True, null=True, related_name="candidate_activities")
+    search_query = models.CharField(max_length=255, blank=True, null=True)
+    metadata = models.JSONField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'candidate activities'
+
+    def __str__(self):
+        return f"{self.candidate.user.username} - {self.activity_type}"
 
 
 @receiver(post_save, sender=User)

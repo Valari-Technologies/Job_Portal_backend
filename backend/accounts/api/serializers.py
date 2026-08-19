@@ -110,6 +110,11 @@ class CandidateProfileSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'phone',
+            'dob',
+            'gender',
+            'address',
+            'city',
+            'state',
             'college',
             'degree',
             'graduation_year',
@@ -251,7 +256,15 @@ class CandidateRegisterSerializer(serializers.ModelSerializer):
         names = full_name.split(' ', 1)
         email = validated_data['email']
 
-        validated_data['username'] = email
+        # Generate a unique username based on the full name
+        base_username = full_name.strip()
+        username = base_username
+        counter = 1
+        while User.objects.filter(username__iexact=username).exists() or User.objects.filter(email__iexact=username).exists():
+            username = f"{base_username} {counter}"
+            counter += 1
+
+        validated_data['username'] = username
         validated_data['first_name'] = names[0]
         validated_data['last_name'] = names[1] if len(names) > 1 else ''
         validated_data['phone_number'] = phone_number
@@ -320,6 +333,21 @@ class HRRegisterSerializer(serializers.ModelSerializer):
         company_address = validated_data.pop('company_address', None)
         designation = validated_data.pop('designation', None)
         
+        first_name = validated_data.get('first_name', '')
+        last_name = validated_data.get('last_name', '')
+        full_name = f"{first_name} {last_name}".strip()
+        if not full_name:
+            full_name = validated_data.get('email', '').split('@')[0]
+
+        # Generate a unique username based on the full name
+        base_username = full_name
+        username = base_username
+        counter = 1
+        while User.objects.filter(username__iexact=username).exists() or User.objects.filter(email__iexact=username).exists():
+            username = f"{base_username} {counter}"
+            counter += 1
+
+        validated_data['username'] = username
         validated_data['role'] = User.Role.HR
         user = User.objects.create_user(**validated_data)
         
@@ -398,6 +426,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 'email': self.user.email,
                 'role': self.user.role,
                 'phone_number': self.user.phone_number,
+                'fullName': f"{self.user.first_name} {self.user.last_name}".strip(),
             }
         }
         return data

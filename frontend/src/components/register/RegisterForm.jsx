@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User, Mail, Phone, Lock, Eye, EyeOff, UserPlus } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import LegalModal from './LegalModal';
 
 export default function RegisterForm() {
@@ -12,15 +13,25 @@ export default function RegisterForm() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [agreeToTerms, setAgreeToTerms] = useState(false);
+
+  const [fieldErrors, setFieldErrors] = useState({});
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [loading, setLoading] = useState(false);
 
   // Modal State Management
   const [isLegalModalOpen, setIsLegalModalOpen] = useState(false);
   const [termsReviewed, setTermsReviewed] = useState(false);
   const [privacyReviewed, setPrivacyReviewed] = useState(false);
+  const navigate = useNavigate();
 
-  const handleSubmit = (e) => {
+  const firstMessage = (value) => (Array.isArray(value) ? value[0] : value);
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setFieldErrors({});
+    setError('');
+    setSuccess('');
 
     if (!termsReviewed || !privacyReviewed) {
       setError('Please review both Terms & Conditions and Privacy Policy before continuing.');
@@ -32,9 +43,84 @@ export default function RegisterForm() {
       return;
     }
 
-    setError('');
-    alert('Account created successfully!');
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const isHr = email.toLowerCase().includes('hr');
+      let response;
+      if (isHr) {
+        // Map frontend fields to backend HR fields
+        const names = fullName.split(' ', 1);
+        const firstName = names[0] || '';
+        const lastName = fullName.substring(firstName.length).trim() || '';
+        response = await axios.post('http://127.0.0.1:8000/accounts/register/hr/', {
+          username: email,
+          email: email,
+          password: password,
+          first_name: firstName,
+          last_name: lastName,
+          phone_number: phoneNumber
+        });
+      } else {
+        response = await axios.post('http://127.0.0.1:8000/accounts/register/candidate/', {
+          fullName,
+          email,
+          phoneNumber,
+          password,
+          confirmPassword,
+          agreeToTerms
+        });
+      }
+
+      setSuccess('Account created successfully! Redirecting to login...');
+      setFullName('');
+      setEmail('');
+      setPhoneNumber('');
+      setPassword('');
+      setConfirmPassword('');
+      setAgreeToTerms(false);
+
+      setTimeout(() => navigate('/login'), 1500);
+
+    } catch (err) {
+      if (err.response && err.response.data) {
+        const data = err.response.data;
+        if (data.detail) {
+          setError(firstMessage(data.detail));
+        } else if (typeof data === 'object') {
+          setFieldErrors(data);
+          if (data.non_field_errors) {
+            setError(firstMessage(data.non_field_errors));
+          } else {
+            // Find first field error to show in main alert banner
+            const keys = Object.keys(data);
+            if (keys.length > 0) {
+              const firstKey = keys[0];
+              setError(`${firstKey}: ${firstMessage(data[firstKey])}`);
+            }
+          }
+        } else {
+          setError('Registration failed. Please check the details and try again.');
+        }
+      } else {
+        setError('Failed to connect to backend server.');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const fieldError = (name) =>
+    fieldErrors[name] ? (
+      <p className="mt-1.5 text-xs font-semibold text-red-600">
+        {firstMessage(fieldErrors[name])}
+      </p>
+    ) : null;
 
   const isFormValid = termsReviewed && privacyReviewed && agreeToTerms;
 
@@ -50,6 +136,20 @@ export default function RegisterForm() {
         </p>
       </div>
 
+      {/* ERROR MESSAGE ALERT */}
+      {error && (
+        <div className="mb-5 p-4 bg-red-50 border border-red-200 text-red-700 text-sm font-semibold rounded-2xl w-full text-center">
+          {error}
+        </div>
+      )}
+
+      {/* SUCCESS MESSAGE ALERT */}
+      {success && (
+        <div className="mb-5 p-4 bg-green-50 border border-green-200 text-green-700 text-sm font-semibold rounded-2xl w-full text-center">
+          {success}
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-5">
         {/* Row 1: Full Name & Email Address */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -64,9 +164,12 @@ export default function RegisterForm() {
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 placeholder="Enter your full name"
-                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs"
+                disabled={loading}
+                required
+                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs disabled:opacity-75"
               />
             </div>
+            {fieldError('fullName')}
           </div>
 
           <div>
@@ -80,9 +183,12 @@ export default function RegisterForm() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Enter your email address"
-                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs"
+                disabled={loading}
+                required
+                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs disabled:opacity-75"
               />
             </div>
+            {fieldError('email')}
           </div>
         </div>
 
@@ -99,9 +205,12 @@ export default function RegisterForm() {
                 value={phoneNumber}
                 onChange={(e) => setPhoneNumber(e.target.value)}
                 placeholder="Enter your phone number"
-                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs"
+                disabled={loading}
+                required
+                className="w-full pl-11 pr-4 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs disabled:opacity-75"
               />
             </div>
+            {fieldError('phoneNumber')}
           </div>
 
           <div>
@@ -115,7 +224,9 @@ export default function RegisterForm() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Create a password"
-                className="w-full pl-11 pr-11 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs"
+                disabled={loading}
+                required
+                className="w-full pl-11 pr-11 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs disabled:opacity-75"
               />
               <button
                 type="button"
@@ -125,6 +236,7 @@ export default function RegisterForm() {
                 {showPassword ? <EyeOff className="w-4.5 h-4.5" /> : <Eye className="w-4.5 h-4.5" />}
               </button>
             </div>
+            {fieldError('password')}
           </div>
         </div>
 
@@ -140,7 +252,9 @@ export default function RegisterForm() {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="Confirm your password"
-              className="w-full pl-11 pr-11 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs"
+              disabled={loading}
+              required
+              className="w-full pl-11 pr-11 py-3 bg-white border border-[#E2E8F0] rounded-2xl text-sm font-medium text-[#1E293B] placeholder-[#94A3B8] outline-none focus:border-[#84A43C] focus:ring-4 focus:ring-[#84A43C]/15 transition-all shadow-xs disabled:opacity-75"
             />
             <button
               type="button"
@@ -150,6 +264,7 @@ export default function RegisterForm() {
               {showConfirmPassword ? <EyeOff className="w-4.5 h-4.5" /> : <Eye className="w-4.5 h-4.5" />}
             </button>
           </div>
+          {fieldError('confirmPassword')}
         </div>
 
         {/* Terms and Conditions Checkbox Area */}
@@ -159,13 +274,13 @@ export default function RegisterForm() {
               type="checkbox"
               id="terms"
               checked={agreeToTerms}
-              disabled={!(termsReviewed && privacyReviewed)}
+              disabled={!(termsReviewed && privacyReviewed) || loading}
               onChange={(e) => {
                 setAgreeToTerms(e.target.checked);
                 if (e.target.checked) setError('');
               }}
               className={`w-4 h-4 rounded-sm focus:ring-[#84A43C]/30 ${
-                (termsReviewed && privacyReviewed)
+                (termsReviewed && privacyReviewed && !loading)
                   ? 'text-[#84A43C] border-[#E2E8F0] cursor-pointer'
                   : 'text-gray-300 border-gray-200 cursor-not-allowed opacity-50'
               }`}
@@ -205,20 +320,22 @@ export default function RegisterForm() {
             </p>
           )}
         </div>
+        {fieldError('agreeToTerms')}
 
         {/* Buttons Action Area */}
         <div className="pt-3">
           {/* CREATE ACCOUNT BUTTON */}
           <button
             type="submit"
+            disabled={loading || !isFormValid}
             className={`flex items-center justify-center gap-2 w-full py-3.5 font-bold text-sm md:text-base tracking-wider rounded-2xl shadow-lg transition-all duration-200 cursor-pointer ${
-              isFormValid
+              (isFormValid && !loading)
                 ? 'bg-[#84A43C] hover:bg-[#73922f] active:scale-[0.99] text-white shadow-[#84A43C]/30'
-                : 'bg-gray-300 text-gray-500 opacity-60'
+                : 'bg-gray-300 text-gray-500 opacity-60 cursor-not-allowed'
             }`}
           >
             <UserPlus className="w-5 h-5" />
-            <span>Create Account</span>
+            <span>{loading ? 'Creating Account...' : 'Create Account'}</span>
           </button>
         </div>
 

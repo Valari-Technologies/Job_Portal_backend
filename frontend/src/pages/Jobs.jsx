@@ -92,11 +92,11 @@ export default function Jobs() {
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-3 shrink-0 w-full sm:w-auto flex-wrap sm:flex-nowrap">
           {/* Lime Green Search Button */}
           <button
             type="button"
-            className="px-8 py-3.5 bg-[#84A43C] hover:bg-[#73922f] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-sm transition-all cursor-pointer"
+            className="flex-grow sm:flex-grow-0 px-8 py-3.5 bg-[#84A43C] hover:bg-[#73922f] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-sm transition-all cursor-pointer text-center"
           >
             Search
           </button>
@@ -104,7 +104,7 @@ export default function Jobs() {
           {/* Save Search Button */}
           <button
             type="button"
-            className="flex items-center gap-2 px-5 py-3.5 bg-white hover:bg-slate-50 border border-slate-200 text-[#84A43C] font-bold text-sm rounded-2xl transition-colors cursor-pointer"
+            className="flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 px-5 py-3.5 bg-white hover:bg-slate-50 border border-slate-200 text-[#84A43C] font-bold text-sm rounded-2xl transition-colors cursor-pointer"
           >
             <Star className="w-4 h-4 text-[#84A43C]" />
             <span>Save Search</span>
@@ -161,7 +161,7 @@ export default function Jobs() {
       {/* Row 3: Sort by & View Toggle */}
       <div className="flex items-center justify-between border-t border-slate-100 pt-4 flex-wrap gap-4 w-full">
         {/* Sort Tabs */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <span className="text-xs sm:text-sm font-bold text-slate-400">Sort by:</span>
           <div className="flex p-1 bg-white border border-slate-200/80 rounded-2xl text-xs sm:text-sm font-semibold">
             <button

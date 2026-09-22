@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser, UserManager
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -137,18 +137,39 @@ class EmploymentType(models.Model):
 
 
 class CustomUserManager(UserManager):
+    def _create_user(self, username, email, password, **extra_fields):
+        if email:
+            email = self.normalize_email(email).lower().strip()
+        return super()._create_user(username, email, password, **extra_fields)
+
     def create_superuser(self, username, email=None, password=None, **extra_fields):
-        extra_fields.setdefault('role', 'ADMIN')
+        extra_fields.setdefault('role', User.Role.SUPER_ADMIN)
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
+
+        if extra_fields.get('role') != User.Role.SUPER_ADMIN:
+            raise ValueError('Superuser must have role=SUPER_ADMIN.')
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError('Superuser must have is_staff=True.')
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError('Superuser must have is_superuser=True.')
+
         return super().create_superuser(username, email, password, **extra_fields)
 
 
 class User(AbstractUser):
     class Role(models.TextChoices):
+        SUPER_ADMIN = "SUPER_ADMIN", "Super Admin"
         ADMIN = "ADMIN", "Admin"
         HR = "HR", "HR"
         CANDIDATE = "CANDIDATE", "Candidate"
+
+    email = models.EmailField(
+        unique=True,
+        error_messages={
+            'unique': 'A user with that email already exists.',
+        },
+    )
 
     role = models.CharField(
         max_length=20,
@@ -166,6 +187,14 @@ class User(AbstractUser):
         upload_to="profile_pictures/",
         blank=True,
         null=True
+    )
+
+    created_by = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name='created_users'
     )
 
     # Social sign-in bookkeeping (ERD: accounts.provider / provider_user_id).
@@ -207,8 +236,88 @@ class User(AbstractUser):
 
     objects = CustomUserManager()
 
+    class Meta(AbstractUser.Meta):
+        constraints = [
+            models.UniqueConstraint(
+                fields=['provider', 'provider_user_id'],
+                name='unique_provider_identity',
+                condition=models.Q(provider__isnull=False) & models.Q(provider_user_id__isnull=False)
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.email:
+            self.email = self.email.lower().strip()
+
+    def save(self, *args, **kwargs):
+        if self.email:
+            self.email = self.email.lower().strip()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.username
+
+
+class UserRole(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="user_roles"
+    )
+    role = models.ForeignKey(
+        Role,
+        on_delete=models.CASCADE,
+        related_name="user_roles"
+    )
+    assigned_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'role'],
+                name='unique_user_role'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.role.name}"
+
+
+class AdminProfile(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="admin_profile"
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True
+    )
+    email = models.EmailField(
+        blank=True,
+        null=True
+    )
+    status = models.CharField(
+        max_length=20,
+        default=User.Status.ACTIVE
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True
+    )
+
+    class Meta:
+        db_table = 'admin'
+
+    def __str__(self):
+        return f"Admin Profile for {self.user.email}"
+
 
 
 class CandidateProfile(models.Model):
@@ -872,23 +981,6 @@ class ApplicationActivity(models.Model):
         return f"{self.action} on application #{self.application_id}"
 
 
-class UserRole(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_roles")
-    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name="user_roles")
-    assigned_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=['user', 'role'],
-                name='unique_user_role'
-            )
-        ]
-
-    def __str__(self):
-        return f"{self.user.username} - {self.role.name}"
-
-
 class EmployerVerification(models.Model):
     class VerificationStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -1138,9 +1230,30 @@ class CandidateActivity(models.Model):
 
 
 @receiver(post_save, sender=User)
-def create_user_profile(sender, instance, created, **kwargs):
-    if created:
+def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
+    if raw:
+        return
+    with transaction.atomic():
+        if instance.role:
+            role_obj, _ = Role.objects.get_or_create(
+                name=instance.role,
+                defaults={"description": f"{instance.get_role_display()} role"}
+            )
+            UserRole.objects.get_or_create(
+                user=instance,
+                role=role_obj
+            )
+
         if instance.role == User.Role.HR:
             HRProfile.objects.get_or_create(user=instance)
         elif instance.role == User.Role.CANDIDATE:
-            CandidateProfile.objects.get_or_create(user=instance)
+            CandidateProfile.objects.get_or_create(user=instance)
+        elif instance.role == User.Role.ADMIN:
+            AdminProfile.objects.get_or_create(
+                user=instance,
+                defaults={
+                    "name": f"{instance.first_name} {instance.last_name}".strip() or instance.email,
+                    "email": instance.email,
+                    "status": instance.status or User.Status.ACTIVE
+                }
+            )

@@ -3,8 +3,12 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     CandidateRegisterView,
     HRRegisterView,
+    AdminCreateUserView,
+    AdminListView,
+    GoogleLoginView,
     CustomTokenObtainPairView,
-    UserProfileView
+    UserProfileView,
+    CurrentUserMeView
 )
 
 urlpatterns = [
@@ -17,6 +21,21 @@ urlpatterns = [
         'register/hr/',
         HRRegisterView.as_view(),
         name='register_hr'
+    ),
+    path(
+        'admin/create-user/',
+        AdminCreateUserView.as_view(),
+        name='admin_create_user'
+    ),
+    path(
+        'admins/',
+        AdminListView.as_view(),
+        name='admin_list'
+    ),
+    path(
+        'google/',
+        GoogleLoginView.as_view(),
+        name='google_login'
     ),
     path(
         'login/',
@@ -32,5 +51,10 @@ urlpatterns = [
         'profile/',
         UserProfileView.as_view(),
         name='user_profile'
+    ),
+    path(
+        'me/',
+        CurrentUserMeView.as_view(),
+        name='current_user_me'
     ),
 ]

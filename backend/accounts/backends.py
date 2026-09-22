@@ -13,13 +13,22 @@ class EmailBackend(ModelBackend):
         email = username or kwargs.get('email')
         if not email:
             return None
+        email = email.lower().strip()
 
         try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+            user = User.objects.get(email__iexact=email)
+        except (User.DoesNotExist, User.MultipleObjectsReturned):
             return None
 
-        if user.check_password(password):
+        if user.check_password(password) and self.user_can_authenticate(user):
             return user
 
         return None
+
+    def user_can_authenticate(self, user):
+        is_active = super().user_can_authenticate(user)
+        if not is_active:
+            return False
+        if getattr(user, 'status', None) and user.status != getattr(User.Status, 'ACTIVE', 'ACTIVE'):
+            return False
+        return True

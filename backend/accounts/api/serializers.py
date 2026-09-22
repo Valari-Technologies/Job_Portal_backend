@@ -6,7 +6,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from ..models import CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill
+from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill
 
 User = get_user_model()
 
@@ -175,8 +175,14 @@ class CandidateRegisterSerializer(serializers.ModelSerializer):
             'phoneNumber',
             'password',
             'confirmPassword',
-            'agreeToTerms'
+            'agreeToTerms',
         )
+
+    def to_internal_value(self, data):
+        role_input = data.get('role')
+        if role_input and role_input != User.Role.CANDIDATE:
+            raise serializers.ValidationError({"role": "Public registration cannot assign privileged roles."})
+        return super().to_internal_value(data)
 
     def validate_fullName(self, value):
         full_name = ' '.join(value.split())
@@ -298,6 +304,213 @@ class CandidateRegisterSerializer(serializers.ModelSerializer):
         }
 
 
+class AdminCreateUserSerializer(serializers.ModelSerializer):
+    """
+    Serializer used by Super Admin to create ADMIN or HR accounts.
+    """
+    password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=True, style={'input_type': 'password'})
+    confirmPassword = serializers.CharField(write_only=True, required=False, allow_blank=True, style={'input_type': 'password'})
+    full_name = serializers.CharField(required=False, allow_blank=True)
+    fullName = serializers.CharField(required=False, allow_blank=True)
+    name = serializers.CharField(required=False, allow_blank=True)
+    role = serializers.ChoiceField(choices=[(User.Role.ADMIN, 'Admin'), (User.Role.HR, 'HR')], default=User.Role.ADMIN)
+    status = serializers.ChoiceField(choices=User.Status.choices, default=User.Status.ACTIVE, required=False)
+    account_status = serializers.CharField(required=False, allow_blank=True)
+    company_name = serializers.CharField(required=False, allow_blank=True)
+    designation = serializers.CharField(required=False, allow_blank=True)
+
+    class Meta:
+        model = User
+        fields = (
+            'email',
+            'password',
+            'confirm_password',
+            'confirmPassword',
+            'full_name',
+            'fullName',
+            'name',
+            'first_name',
+            'last_name',
+            'phone_number',
+            'role',
+            'status',
+            'account_status',
+            'company_name',
+            'designation',
+        )
+
+    def validate_email(self, value):
+        email = value.lower().strip()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return email
+
+    def validate_role(self, value):
+        if value not in [User.Role.ADMIN, User.Role.HR]:
+            raise serializers.ValidationError("Only ADMIN or HR roles can be created by Super Admin.")
+        return value
+
+    def validate(self, attrs):
+        password = attrs.get('password')
+        confirm_password = attrs.get('confirmPassword') or attrs.get('confirm_password')
+
+        if confirm_password and password != confirm_password:
+            raise serializers.ValidationError({"confirmPassword": "Passwords do not match."})
+
+        # Apply Django password validators
+        raw_name = attrs.get('full_name') or attrs.get('fullName') or attrs.get('name') or f"{attrs.get('first_name', '')} {attrs.get('last_name', '')}".strip()
+        names = raw_name.split(' ', 1) if raw_name else ['', '']
+        dummy_user = User(
+            username=attrs.get('email', ''),
+            email=attrs.get('email', ''),
+            first_name=names[0],
+            last_name=names[1] if len(names) > 1 else ''
+        )
+        try:
+            validate_password(password, dummy_user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)})
+
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop('confirmPassword', None)
+        validated_data.pop('confirm_password', None)
+        company_name = validated_data.pop('company_name', None)
+        designation = validated_data.pop('designation', None)
+
+        raw_status = validated_data.pop('account_status', None)
+        if raw_status:
+            status_upper = raw_status.upper().strip()
+            if status_upper in dict(User.Status.choices):
+                validated_data['status'] = status_upper
+            elif status_upper == 'ACTIVE' or raw_status.lower() == 'active':
+                validated_data['status'] = User.Status.ACTIVE
+            elif status_upper == 'INACTIVE' or raw_status.lower() == 'inactive':
+                validated_data['status'] = User.Status.INACTIVE
+
+        raw_name = validated_data.pop('full_name', None) or validated_data.pop('fullName', None) or validated_data.pop('name', None)
+        if raw_name:
+            names = raw_name.strip().split(' ', 1)
+            validated_data['first_name'] = names[0]
+            validated_data['last_name'] = names[1] if len(names) > 1 else ''
+
+        email = validated_data['email'].lower().strip()
+        validated_data['email'] = email
+
+        request = self.context.get('request')
+        creator = request.user if request and request.user.is_authenticated else None
+
+        first_name = validated_data.get('first_name', '')
+        last_name = validated_data.get('last_name', '')
+        full_name = f"{first_name} {last_name}".strip() or email.split('@')[0]
+
+        base_username = full_name
+        username = base_username
+        counter = 1
+        while User.objects.filter(username__iexact=username).exists() or User.objects.filter(email__iexact=username).exists():
+            username = f"{base_username} {counter}"
+            counter += 1
+
+        validated_data['username'] = username
+        validated_data['created_by'] = creator
+
+        with transaction.atomic():
+            user = User.objects.create_user(**validated_data)
+            
+            # Ensure UserRole mapping is synced
+            role_obj, _ = Role.objects.get_or_create(
+                name=user.role,
+                defaults={"description": f"{user.get_role_display()} role"}
+            )
+            UserRole.objects.get_or_create(user=user, role=role_obj)
+
+            # Ensure AdminProfile or HRProfile row is created transactionally
+            if user.role == User.Role.ADMIN:
+                from accounts.models import AdminProfile
+                admin_prof, _ = AdminProfile.objects.get_or_create(
+                    user=user,
+                    defaults={
+                        "name": full_name,
+                        "email": user.email,
+                        "status": user.status
+                    }
+                )
+                admin_prof.name = full_name
+                admin_prof.email = user.email
+                admin_prof.status = user.status
+                admin_prof.save()
+            elif user.role == User.Role.HR:
+                profile, _ = HRProfile.objects.get_or_create(user=user)
+                if company_name:
+                    profile.company_name = company_name
+                if designation:
+                    profile.designation = designation
+                profile.save()
+
+        return user
+
+    def to_representation(self, instance):
+        return {
+            'id': instance.id,
+            'username': instance.username,
+            'email': instance.email,
+            'name': f"{instance.first_name} {instance.last_name}".strip() or instance.username,
+            'fullName': f"{instance.first_name} {instance.last_name}".strip() or instance.username,
+            'first_name': instance.first_name,
+            'last_name': instance.last_name,
+            'role': instance.role,
+            'status': instance.status,
+            'phone_number': instance.phone_number,
+            'created_by': instance.created_by.id if instance.created_by else None,
+            'created_at': instance.created_at,
+        }
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """
+    Serializer used by Super Admin to list created Admin accounts safely.
+    """
+    name = serializers.SerializerMethodField()
+    full_name = serializers.SerializerMethodField()
+    account_status = serializers.CharField(source='status')
+    created_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'name',
+            'full_name',
+            'username',
+            'email',
+            'role',
+            'status',
+            'account_status',
+            'created_at',
+            'created_by'
+        )
+
+    def get_name(self, obj):
+        full_name = f"{obj.first_name} {obj.last_name}".strip()
+        return full_name if full_name else obj.username
+
+    def get_full_name(self, obj):
+        return self.get_name(obj)
+
+    def get_created_by(self, obj):
+        if not obj.created_by:
+            return None
+        cb_name = f"{obj.created_by.first_name} {obj.created_by.last_name}".strip() or obj.created_by.username
+        return {
+            'id': obj.created_by.id,
+            'email': obj.created_by.email,
+            'name': cb_name
+        }
+
+
+
 class HRRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
     
@@ -378,10 +591,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['role'] = user.role
         token['username'] = user.username
         token['email'] = user.email
+        token['user_id'] = user.id
         return token
 
     def validate(self, attrs):
-        email = attrs.get('email')
+        email = attrs.get('email', '').lower().strip()
         password = attrs.get('password')
 
         if not email:
@@ -397,39 +611,122 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         except DjangoValidationError:
             raise serializers.ValidationError({"email": "Enter a valid email address."})
 
-        # Check if user exists
+        # Check if user exists and active status
         try:
-            user = User.objects.get(email=email)
+            user = User.objects.get(email__iexact=email)
+            if not user.is_active or user.status != User.Status.ACTIVE:
+                raise serializers.ValidationError({"detail": "User account is inactive or suspended."})
         except User.DoesNotExist:
-            raise serializers.ValidationError({"detail": "No account found with this email."})
-
-        # Check if user is active
-        if not user.is_active:
-            raise serializers.ValidationError({"detail": "User account is inactive."})
+            pass
 
         # Authenticate user
         from django.contrib.auth import authenticate
         self.user = authenticate(username=email, password=password)
         
         if not self.user:
-            raise serializers.ValidationError({"detail": "Wrong password."})
+            raise serializers.ValidationError({"detail": "Invalid email or password."})
 
         # Generate tokens
         refresh = self.get_token(self.user)
 
+        user_payload = {
+            'id': self.user.id,
+            'username': self.user.username,
+            'email': self.user.email,
+            'role': self.user.role,
+            'phone_number': self.user.phone_number,
+            'fullName': f"{self.user.first_name} {self.user.last_name}".strip(),
+            'status': self.user.status,
+        }
+
+        if self.user.role == User.Role.CANDIDATE:
+            candidate_profile = getattr(self.user, 'candidate_profile', None)
+            user_payload['profile_completed'] = candidate_profile.profile_completed if candidate_profile else False
+            user_payload['profile_completion'] = candidate_profile.profile_completion if candidate_profile else 0
+
         data = {
             'refresh': str(refresh),
             'access': str(refresh.access_token),
-            'user': {
-                'id': self.user.id,
-                'username': self.user.username,
-                'email': self.user.email,
-                'role': self.user.role,
-                'phone_number': self.user.phone_number,
-                'fullName': f"{self.user.first_name} {self.user.last_name}".strip(),
-            }
+            'user': user_payload
         }
         return data
+
+
+class GoogleLoginSerializer(serializers.Serializer):
+    token = serializers.CharField(write_only=True)
+
+    def validate(self, attrs):
+        token = attrs.get('token')
+        import urllib.request
+        import json
+        from decouple import config
+
+        google_client_id = config('GOOGLE_CLIENT_ID', default=None)
+
+        try:
+            url = f"https://oauth2.googleapis.com/tokeninfo?id_token={token}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except Exception:
+            raise serializers.ValidationError({"token": "Invalid Google token."})
+
+        google_id = payload.get('sub')
+        email = payload.get('email', '').lower().strip()
+        aud = payload.get('aud')
+
+        if not google_id or not email:
+            raise serializers.ValidationError({"token": "Invalid Google token payload."})
+
+        if google_client_id and aud != google_client_id:
+            raise serializers.ValidationError({"token": "Google client ID mismatch."})
+
+        user = User.objects.filter(provider='GOOGLE', provider_user_id=google_id).first()
+        if not user:
+            user = User.objects.filter(email__iexact=email).first()
+            if user:
+                if not user.provider:
+                    user.provider = 'GOOGLE'
+                    user.provider_user_id = google_id
+                    user.save(update_fields=['provider', 'provider_user_id', 'updated_at'])
+            else:
+                base_username = email.split('@')[0]
+                username = base_username
+                counter = 1
+                while User.objects.filter(username__iexact=username).exists() or User.objects.filter(email__iexact=username).exists():
+                    username = f"{base_username}{counter}"
+                    counter += 1
+
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    role=User.Role.CANDIDATE,
+                    provider='GOOGLE',
+                    provider_user_id=google_id,
+                )
+
+        if not user.is_active or user.status != User.Status.ACTIVE:
+            raise serializers.ValidationError({"detail": "User account is inactive or suspended."})
+
+        refresh = CustomTokenObtainPairSerializer.get_token(user)
+
+        user_payload = {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'role': user.role,
+            'phone_number': user.phone_number,
+            'fullName': f"{user.first_name} {user.last_name}".strip(),
+            'status': user.status,
+        }
+
+        attrs['tokens'] = {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'user': user_payload
+        }
+        attrs['user'] = user
+        return attrs
 
 
 class UserProfileUpdateSerializer(serializers.ModelSerializer):

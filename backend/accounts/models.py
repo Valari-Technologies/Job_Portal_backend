@@ -67,9 +67,11 @@ class Department(models.Model):
 
 class Location(models.Model):
     class LocationType(models.TextChoices):
-        STATE_DISTRICT = "STATE_DISTRICT", "State District"
-        CITY = "CITY", "City"
+        STATE = "STATE", "State"
+        DISTRICT = "DISTRICT", "District"
+        CITY = "CITY", "City / Town"
         LOCALITY = "LOCALITY", "Locality"
+        STATE_DISTRICT = "STATE_DISTRICT", "State District"
 
     name = models.CharField(max_length=100)
     location_type = models.CharField(
@@ -88,8 +90,38 @@ class Location(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def get_full_path(self):
+        parts = []
+        curr = self
+        visited = set()
+        while curr and curr.id not in visited:
+            visited.add(curr.id)
+            parts.append(curr.name)
+            curr = curr.parent
+        return " -> ".join(reversed(parts))
+
+    def get_state(self):
+        curr = self
+        visited = set()
+        while curr and curr.id not in visited:
+            visited.add(curr.id)
+            if curr.location_type in [self.LocationType.STATE, self.LocationType.STATE_DISTRICT] or not curr.parent:
+                return curr.name
+            curr = curr.parent
+        return None
+
+    def get_district(self):
+        curr = self
+        visited = set()
+        while curr and curr.id not in visited:
+            visited.add(curr.id)
+            if curr.location_type in [self.LocationType.DISTRICT, self.LocationType.STATE_DISTRICT]:
+                return curr.name
+            curr = curr.parent
+        return None
+
     def __str__(self):
-        return self.name
+        return self.get_full_path()
 
 
 class JobCategory(models.Model):
@@ -1256,4 +1288,4 @@ def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
                     "email": instance.email,
                     "status": instance.status or User.Status.ACTIVE
                 }
-            )
+            )

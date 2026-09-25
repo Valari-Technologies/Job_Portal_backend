@@ -6,7 +6,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill
+from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location
 
 User = get_user_model()
 
@@ -136,6 +136,24 @@ class HRProfileSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'company_name',
+            'company_email',
+            'company_phone',
+            'company_website',
+            'website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'location_id',
+            'primary_contact_name',
+            'mobile_number',
+            'profile_photo',
+            'date_of_birth',
+            'dob',
+            'gender',
+            'expected_salary_min',
+            'expected_salary_max',
+            'preferred_job_type',
+            'preferred_work_mode_id',
             'company_website',
             'company_address',
             'designation'
@@ -314,11 +332,29 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(required=False, allow_blank=True)
     fullName = serializers.CharField(required=False, allow_blank=True)
     name = serializers.CharField(required=False, allow_blank=True)
-    role = serializers.ChoiceField(choices=[(User.Role.ADMIN, 'Admin'), (User.Role.HR, 'HR')], default=User.Role.ADMIN)
+    role = serializers.ChoiceField(choices=[(User.Role.ADMIN, 'Admin'), (User.Role.HR, 'HR'), (User.Role.CANDIDATE, 'Candidate')], default=User.Role.ADMIN)
     status = serializers.ChoiceField(choices=User.Status.choices, default=User.Status.ACTIVE, required=False)
     account_status = serializers.CharField(required=False, allow_blank=True)
     company_name = serializers.CharField(required=False, allow_blank=True)
     designation = serializers.CharField(required=False, allow_blank=True)
+    company_email = serializers.CharField(required=False, allow_blank=True)
+    company_phone = serializers.CharField(required=False, allow_blank=True)
+    company_website = serializers.CharField(required=False, allow_blank=True)
+    website = serializers.CharField(required=False, allow_blank=True)
+    company_address = serializers.CharField(required=False, allow_blank=True)
+    company_description = serializers.CharField(required=False, allow_blank=True)
+    company_logo = serializers.CharField(required=False, allow_blank=True)
+    location_id = serializers.IntegerField(required=False, allow_null=True)
+    primary_contact_name = serializers.CharField(required=False, allow_blank=True)
+    mobile_number = serializers.CharField(required=False, allow_blank=True)
+    profile_photo = serializers.CharField(required=False, allow_blank=True)
+    date_of_birth = serializers.CharField(required=False, allow_blank=True)
+    dob = serializers.CharField(required=False, allow_blank=True)
+    gender = serializers.CharField(required=False, allow_blank=True)
+    expected_salary_min = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    expected_salary_max = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    preferred_job_type = serializers.CharField(required=False, allow_blank=True)
+    preferred_work_mode_id = serializers.IntegerField(required=False, allow_null=True)
 
     class Meta:
         model = User
@@ -337,6 +373,24 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             'status',
             'account_status',
             'company_name',
+            'company_email',
+            'company_phone',
+            'company_website',
+            'website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'location_id',
+            'primary_contact_name',
+            'mobile_number',
+            'profile_photo',
+            'date_of_birth',
+            'dob',
+            'gender',
+            'expected_salary_min',
+            'expected_salary_max',
+            'preferred_job_type',
+            'preferred_work_mode_id',
             'designation',
         )
 
@@ -347,8 +401,8 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         return email
 
     def validate_role(self, value):
-        if value not in [User.Role.ADMIN, User.Role.HR]:
-            raise serializers.ValidationError("Only ADMIN or HR roles can be created by Super Admin.")
+        if value not in [User.Role.ADMIN, User.Role.HR, User.Role.CANDIDATE]:
+            raise serializers.ValidationError("Only ADMIN, HR, or CANDIDATE roles can be created by Super Admin.")
         return value
 
     def validate(self, attrs):
@@ -378,6 +432,24 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         validated_data.pop('confirmPassword', None)
         validated_data.pop('confirm_password', None)
         company_name = validated_data.pop('company_name', None)
+        company_email = validated_data.pop('company_email', None)
+        company_phone = validated_data.pop('company_phone', None)
+        company_website = validated_data.pop('company_website', None) or validated_data.pop('website', None)
+        company_address = validated_data.pop('company_address', None)
+        company_description = validated_data.pop('company_description', None)
+        company_logo = validated_data.pop('company_logo', None)
+        location_id = validated_data.pop('location_id', None)
+        primary_contact_name = validated_data.pop('primary_contact_name', None)
+        mobile_number = validated_data.pop('mobile_number', None)
+        profile_photo = validated_data.pop('profile_photo', None)
+        date_of_birth = validated_data.pop('date_of_birth', None) or validated_data.pop('dob', None)
+        gender = validated_data.pop('gender', None)
+        expected_salary_min = validated_data.pop('expected_salary_min', None)
+        expected_salary_max = validated_data.pop('expected_salary_max', None)
+        preferred_job_type = validated_data.pop('preferred_job_type', None)
+        preferred_work_mode_id = validated_data.pop('preferred_work_mode_id', None)
+        if mobile_number and not validated_data.get('phone_number'):
+            validated_data['phone_number'] = mobile_number
         designation = validated_data.pop('designation', None)
 
         raw_status = validated_data.pop('account_status', None)
@@ -441,13 +513,65 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
                 admin_prof.email = user.email
                 admin_prof.status = user.status
                 admin_prof.save()
+            elif user.role == User.Role.CANDIDATE:
+                profile, _ = CandidateProfile.objects.get_or_create(user=user)
+                if full_name:
+                    profile.full_name = full_name
+                if user.phone_number:
+                    profile.phone = user.phone_number
+                if profile_photo:
+                    profile.profile_photo = profile_photo
+                if date_of_birth:
+                    profile.dob = date_of_birth
+                if gender:
+                    profile.gender = gender
+                if location_id:
+                    profile.location_id = location_id
+                if expected_salary_min is not None:
+                    profile.expected_salary_min = expected_salary_min
+                if expected_salary_max is not None:
+                    profile.expected_salary_max = expected_salary_max
+                if preferred_job_type:
+                    profile.preferred_job_type = preferred_job_type
+                if preferred_work_mode_id:
+                    profile.preferred_work_mode_id = preferred_work_mode_id
+                profile.save()
             elif user.role == User.Role.HR:
                 profile, _ = HRProfile.objects.get_or_create(user=user)
                 if company_name:
                     profile.company_name = company_name
+                if company_email:
+                    profile.company_email = company_email
+                elif user.email:
+                    profile.company_email = user.email
+                if company_phone:
+                    profile.company_phone = company_phone
+                elif user.phone_number:
+                    profile.company_phone = user.phone_number
+                if company_website:
+                    profile.company_website = company_website
+                if company_address:
+                    profile.company_address = company_address
+                if company_description:
+                    profile.company_description = company_description
+                if company_logo:
+                    profile.company_logo = company_logo
+                if location_id:
+                    profile.location_id = location_id
                 if designation:
                     profile.designation = designation
+                profile.verification_status = 'PENDING'
+                profile.trust_level = 'NEW'
                 profile.save()
+
+                EmployerVerification.objects.get_or_create(
+                    employer=profile,
+                    defaults={'verification_status': EmployerVerification.VerificationStatus.PENDING}
+                )
+                EmployerTrust.objects.get_or_create(
+                    employer=profile,
+                    defaults={'trust_level': EmployerTrust.TrustLevel.NEW, 'trust_score': 0, 'is_trusted': False}
+                )
 
         return user
 
@@ -523,6 +647,24 @@ class HRRegisterSerializer(serializers.ModelSerializer):
     )
     company_address = serializers.CharField(required=False, allow_blank=True)
     designation = serializers.CharField(required=False, allow_blank=True)
+    company_email = serializers.CharField(required=False, allow_blank=True)
+    company_phone = serializers.CharField(required=False, allow_blank=True)
+    company_website = serializers.CharField(required=False, allow_blank=True)
+    website = serializers.CharField(required=False, allow_blank=True)
+    company_address = serializers.CharField(required=False, allow_blank=True)
+    company_description = serializers.CharField(required=False, allow_blank=True)
+    company_logo = serializers.CharField(required=False, allow_blank=True)
+    location_id = serializers.IntegerField(required=False, allow_null=True)
+    primary_contact_name = serializers.CharField(required=False, allow_blank=True)
+    mobile_number = serializers.CharField(required=False, allow_blank=True)
+    profile_photo = serializers.CharField(required=False, allow_blank=True)
+    date_of_birth = serializers.CharField(required=False, allow_blank=True)
+    dob = serializers.CharField(required=False, allow_blank=True)
+    gender = serializers.CharField(required=False, allow_blank=True)
+    expected_salary_min = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    expected_salary_max = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    preferred_job_type = serializers.CharField(required=False, allow_blank=True)
+    preferred_work_mode_id = serializers.IntegerField(required=False, allow_null=True)
     
     class Meta:
         model = User
@@ -535,6 +677,24 @@ class HRRegisterSerializer(serializers.ModelSerializer):
             'phone_number',
             'profile_picture',
             'company_name',
+            'company_email',
+            'company_phone',
+            'company_website',
+            'website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'location_id',
+            'primary_contact_name',
+            'mobile_number',
+            'profile_photo',
+            'date_of_birth',
+            'dob',
+            'gender',
+            'expected_salary_min',
+            'expected_salary_max',
+            'preferred_job_type',
+            'preferred_work_mode_id',
             'company_website',
             'company_address',
             'designation'
@@ -542,6 +702,24 @@ class HRRegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         company_name = validated_data.pop('company_name', None)
+        company_email = validated_data.pop('company_email', None)
+        company_phone = validated_data.pop('company_phone', None)
+        company_website = validated_data.pop('company_website', None) or validated_data.pop('website', None)
+        company_address = validated_data.pop('company_address', None)
+        company_description = validated_data.pop('company_description', None)
+        company_logo = validated_data.pop('company_logo', None)
+        location_id = validated_data.pop('location_id', None)
+        primary_contact_name = validated_data.pop('primary_contact_name', None)
+        mobile_number = validated_data.pop('mobile_number', None)
+        profile_photo = validated_data.pop('profile_photo', None)
+        date_of_birth = validated_data.pop('date_of_birth', None) or validated_data.pop('dob', None)
+        gender = validated_data.pop('gender', None)
+        expected_salary_min = validated_data.pop('expected_salary_min', None)
+        expected_salary_max = validated_data.pop('expected_salary_max', None)
+        preferred_job_type = validated_data.pop('preferred_job_type', None)
+        preferred_work_mode_id = validated_data.pop('preferred_work_mode_id', None)
+        if mobile_number and not validated_data.get('phone_number'):
+            validated_data['phone_number'] = mobile_number
         company_website = validated_data.pop('company_website', None)
         company_address = validated_data.pop('company_address', None)
         designation = validated_data.pop('designation', None)
@@ -782,3 +960,202 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
             profile.save()
             
         return instance
+
+
+
+class EmployerProfileSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    email = serializers.EmailField(source='user.email', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    role = serializers.CharField(source='user.role', read_only=True)
+    status = serializers.CharField(source='user.status', read_only=True)
+    phone_number = serializers.CharField(source='user.phone_number', read_only=True)
+
+    class Meta:
+        model = HRProfile
+        fields = (
+            'id',
+            'user_id',
+            'full_name',
+            'email',
+            'phone_number',
+            'role',
+            'status',
+            'company_name',
+            'company_email',
+            'company_phone',
+            'company_website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'designation',
+            'location',
+            'verification_status',
+            'trust_level',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'user_id', 'email', 'role', 'status', 'verification_status', 'trust_level', 'created_at', 'updated_at')
+
+    def get_full_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    confirm_password = serializers.CharField(write_only=True, required=False, allow_blank=True, style={'input_type': 'password'})
+    confirmPassword = serializers.CharField(write_only=True, required=False, allow_blank=True, style={'input_type': 'password'})
+
+    def validate(self, attrs):
+        password = attrs.get('password')
+        confirm_password = attrs.get('confirmPassword') or attrs.get('confirm_password')
+
+        if confirm_password and password != confirm_password:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+
+        return attrs
+
+
+
+class LocationSerializer(serializers.ModelSerializer):
+    full_path = serializers.CharField(source='get_full_path', read_only=True)
+    state = serializers.CharField(source='get_state', read_only=True)
+    district = serializers.CharField(source='get_district', read_only=True)
+
+    class Meta:
+        model = Location
+        fields = (
+            'id',
+            'name',
+            'location_type',
+            'parent',
+            'is_active',
+            'full_path',
+            'state',
+            'district',
+            'created_at',
+            'updated_at',
+        )
+        read_only_fields = ('id', 'full_path', 'state', 'district', 'created_at', 'updated_at')
+
+    def validate(self, attrs):
+        location_type = attrs.get('location_type')
+        parent = attrs.get('parent')
+
+        if location_type == Location.LocationType.STATE:
+            if parent is not None:
+                raise serializers.ValidationError({"parent": "State location level cannot have a parent."})
+        elif location_type == Location.LocationType.DISTRICT:
+            if not parent or parent.location_type not in [Location.LocationType.STATE, Location.LocationType.STATE_DISTRICT]:
+                raise serializers.ValidationError({"parent": "District parent must be a State."})
+        elif location_type == Location.LocationType.CITY:
+            if not parent or parent.location_type not in [Location.LocationType.DISTRICT, Location.LocationType.STATE_DISTRICT]:
+                raise serializers.ValidationError({"parent": "City / Town parent must be a District."})
+        elif location_type == Location.LocationType.LOCALITY:
+            if not parent or parent.location_type != Location.LocationType.CITY:
+                raise serializers.ValidationError({"parent": "Locality parent must be a City / Town."})
+
+        return attrs
+
+
+class CandidateUserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
+    location = LocationSerializer(source='candidate_profile.location', read_only=True)
+    gender = serializers.CharField(source='candidate_profile.gender', read_only=True)
+    date_of_birth = serializers.CharField(source='candidate_profile.dob', read_only=True)
+    profile_photo = serializers.CharField(source='candidate_profile.profile_photo', read_only=True)
+    profile_completion = serializers.IntegerField(source='candidate_profile.profile_completion', read_only=True)
+    expected_salary_min = serializers.DecimalField(source='candidate_profile.expected_salary_min', max_digits=12, decimal_places=2, read_only=True)
+    expected_salary_max = serializers.DecimalField(source='candidate_profile.expected_salary_max', max_digits=12, decimal_places=2, read_only=True)
+    preferred_job_type = serializers.CharField(source='candidate_profile.preferred_job_type', read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'email',
+            'phone_number',
+            'role',
+            'status',
+            'full_name',
+            'name',
+            'location',
+            'gender',
+            'date_of_birth',
+            'profile_photo',
+            'profile_completion',
+            'expected_salary_min',
+            'expected_salary_max',
+            'preferred_job_type',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_full_name(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile and obj.candidate_profile.full_name:
+            return obj.candidate_profile.full_name
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name if name else obj.username
+
+    def get_name(self, obj):
+        return self.get_full_name(obj)
+
+
+class EmployerUserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
+    company_name = serializers.CharField(source='hr_profile.company_name', read_only=True)
+    company_email = serializers.CharField(source='hr_profile.company_email', read_only=True)
+    company_phone = serializers.CharField(source='hr_profile.company_phone', read_only=True)
+    company_website = serializers.CharField(source='hr_profile.company_website', read_only=True)
+    company_address = serializers.CharField(source='hr_profile.company_address', read_only=True)
+    company_description = serializers.CharField(source='hr_profile.company_description', read_only=True)
+    company_logo = serializers.CharField(source='hr_profile.company_logo', read_only=True)
+    designation = serializers.CharField(source='hr_profile.designation', read_only=True)
+    verification_status = serializers.CharField(source='hr_profile.verification_status', read_only=True)
+    trust_level = serializers.CharField(source='hr_profile.trust_level', read_only=True)
+    location = LocationSerializer(source='hr_profile.location', read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'email',
+            'phone_number',
+            'role',
+            'status',
+            'full_name',
+            'name',
+            'company_name',
+            'company_email',
+            'company_phone',
+            'company_website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'designation',
+            'verification_status',
+            'trust_level',
+            'location',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_full_name(self, obj):
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name if name else obj.username
+
+    def get_name(self, obj):
+        return self.get_full_name(obj)

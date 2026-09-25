@@ -8,7 +8,13 @@ from .views import (
     GoogleLoginView,
     CustomTokenObtainPairView,
     UserProfileView,
-    CurrentUserMeView
+    CurrentUserMeView,
+    EmployerProfileView,
+    PasswordResetRequestView,
+    PasswordResetConfirmView,
+    LocationListView,
+    EmployerListView,
+    CandidateListView,
 )
 
 urlpatterns = [
@@ -56,5 +62,35 @@ urlpatterns = [
         'me/',
         CurrentUserMeView.as_view(),
         name='current_user_me'
+    ),
+    path(
+        'employer/profile/',
+        EmployerProfileView.as_view(),
+        name='employer_profile'
+    ),
+    path(
+        'password-reset/',
+        PasswordResetRequestView.as_view(),
+        name='password_reset_request'
+    ),
+    path(
+        'password-reset/confirm/',
+        PasswordResetConfirmView.as_view(),
+        name='password_reset_confirm'
+    ),
+    path(
+        'candidates/',
+        CandidateListView.as_view(),
+        name='candidate_list'
+    ),
+    path(
+        'employers/',
+        EmployerListView.as_view(),
+        name='employer_list'
+    ),
+    path(
+        'locations/',
+        LocationListView.as_view(),
+        name='location_list'
     ),
 ]

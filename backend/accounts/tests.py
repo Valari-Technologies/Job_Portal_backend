@@ -447,3 +447,191 @@ class AdminListAndCurrentMeViewTests(TestCase):
         self.assertEqual(res.data["name"], "Alice Admin")
         self.assertNotIn("password", res.data)
 
+
+
+
+class EmployerFlowTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superadmin = User.objects.create_superuser(
+            username="superadmin_test", email="supertest@example.com", password="SuperPassword123!"
+        )
+        self.admin = User.objects.create_user(
+            username="admin_test", email="admintest@example.com", password="Password123!", role=User.Role.ADMIN
+        )
+        self.employer1 = User.objects.create_user(
+            username="employer1", email="employer1@example.com", password="Password123!", role=User.Role.HR, first_name="Emp", last_name="One"
+        )
+        self.employer2 = User.objects.create_user(
+            username="employer2", email="employer2@example.com", password="Password123!", role=User.Role.HR, first_name="Emp", last_name="Two"
+        )
+        self.candidate = User.objects.create_user(
+            username="candidate_test", email="candtest@example.com", password="Password123!", role=User.Role.CANDIDATE
+        )
+        self.inactive_employer = User.objects.create_user(
+            username="inactive_emp", email="inactive_emp@example.com", password="Password123!", role=User.Role.HR, status=User.Status.INACTIVE
+        )
+        self.suspended_employer = User.objects.create_user(
+            username="suspended_emp", email="suspended_emp@example.com", password="Password123!", role=User.Role.HR, status=User.Status.SUSPENDED
+        )
+
+        self.create_user_url = reverse('admin_create_user')
+        self.login_url = reverse('token_obtain_pair')
+        self.employer_profile_url = reverse('employer_profile')
+        self.password_reset_url = reverse('password_reset_request')
+        self.password_reset_confirm_url = reverse('password_reset_confirm')
+
+    def test_31_super_admin_can_create_employer(self):
+        self.client.force_authenticate(user=self.superadmin)
+        payload = {
+            "email": "newemployer@example.com",
+            "password": "Password123!",
+            "confirm_password": "Password123!",
+            "full_name": "New Employer",
+            "company_name": "Acme Corp",
+            "company_email": "acme@example.com",
+            "company_phone": "+919876543210",
+            "company_website": "https://acme.com",
+            "company_address": "Chennai, Tamil Nadu",
+            "company_description": "Great company",
+            "designation": "HR Director",
+            "role": "HR"
+        }
+        res = self.client.post(self.create_user_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res.data['user']['role'], 'HR')
+        
+        # Verify DB records
+        created_user = User.objects.get(email="newemployer@example.com")
+        self.assertEqual(created_user.role, User.Role.HR)
+        self.assertEqual(created_user.created_by, self.superadmin)
+        self.assertTrue(created_user.check_password("Password123!"))
+
+        # Verify HRProfile
+        profile = HRProfile.objects.get(user=created_user)
+        self.assertEqual(profile.company_name, "Acme Corp")
+        self.assertEqual(profile.company_email, "acme@example.com")
+        self.assertEqual(profile.company_phone, "+919876543210")
+        self.assertEqual(profile.company_website, "https://acme.com")
+        self.assertEqual(profile.designation, "HR Director")
+        self.assertEqual(profile.verification_status, "PENDING")
+
+        # Verify sensitive password data not in API response
+        self.assertNotIn('password', res.data['user'])
+        self.assertNotIn('password_hash', res.data['user'])
+
+    def test_32_admin_cannot_create_employer(self):
+        self.client.force_authenticate(user=self.admin)
+        payload = {
+            "email": "admintryemp@example.com",
+            "password": "Password123!",
+            "role": "HR"
+        }
+        res = self.client.post(self.create_user_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_33_candidate_and_employer_cannot_create_employer(self):
+        self.client.force_authenticate(user=self.candidate)
+        res_cand = self.client.post(self.create_user_url, {"email": "c1@example.com", "password": "Password123!", "role": "HR"}, format='json')
+        self.assertEqual(res_cand.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.employer1)
+        res_emp = self.client.post(self.create_user_url, {"email": "e1@example.com", "password": "Password123!", "role": "HR"}, format='json')
+        self.assertEqual(res_emp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_34_anonymous_user_cannot_create_employer(self):
+        res = self.client.post(self.create_user_url, {"email": "anon@example.com", "password": "Password123!", "role": "HR"}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_35_duplicate_email_rejected_on_employer_creation(self):
+        self.client.force_authenticate(user=self.superadmin)
+        payload = {
+            "email": "employer1@example.com",
+            "password": "Password123!",
+            "role": "HR"
+        }
+        res = self.client.post(self.create_user_url, payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_36_employer_can_login_with_valid_credentials(self):
+        res = self.client.post(self.login_url, {"email": "employer1@example.com", "password": "Password123!"}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['user']['role'], User.Role.HR)
+
+    def test_37_inactive_and_suspended_employer_cannot_login(self):
+        res_inact = self.client.post(self.login_url, {"email": "inactive_emp@example.com", "password": "Password123!"}, format='json')
+        self.assertEqual(res_inact.status_code, status.HTTP_400_BAD_REQUEST)
+
+        res_susp = self.client.post(self.login_url, {"email": "suspended_emp@example.com", "password": "Password123!"}, format='json')
+        self.assertEqual(res_susp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_38_employer_can_get_and_patch_own_company_profile(self):
+        self.client.force_authenticate(user=self.employer1)
+        res_get = self.client.get(self.employer_profile_url)
+        self.assertEqual(res_get.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_get.data['email'], "employer1@example.com")
+
+        # Update profile
+        patch_payload = {
+            "company_name": "Updated Tech",
+            "company_email": "info@updatedtech.com",
+            "company_phone": "+919999988888",
+            "company_website": "https://updatedtech.com",
+            "company_address": "Coimbatore",
+            "company_description": "Leading tech company",
+            "designation": "Head of HR"
+        }
+        res_patch = self.client.patch(self.employer_profile_url, patch_payload, format='json')
+        self.assertEqual(res_patch.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_patch.data['company_name'], "Updated Tech")
+
+        # Verify DB update
+        profile = HRProfile.objects.get(user=self.employer1)
+        self.assertEqual(profile.company_name, "Updated Tech")
+        self.assertEqual(profile.company_email, "info@updatedtech.com")
+
+    def test_39_candidate_and_admin_cannot_access_employer_profile(self):
+        self.client.force_authenticate(user=self.candidate)
+        res_cand = self.client.get(self.employer_profile_url)
+        self.assertEqual(res_cand.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user=self.admin)
+        res_admin = self.client.get(self.employer_profile_url)
+        self.assertEqual(res_admin.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_40_forgot_password_generic_response_prevents_email_enumeration(self):
+        # Existing email
+        res_exist = self.client.post(self.password_reset_url, {"email": "employer1@example.com"}, format='json')
+        self.assertEqual(res_exist.status_code, status.HTTP_200_OK)
+        self.assertIn("instructions will be sent", res_exist.data['message'])
+
+        # Non-existing email
+        res_nonexist = self.client.post(self.password_reset_url, {"email": "nonexisting@example.com"}, format='json')
+        self.assertEqual(res_nonexist.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_exist.data['message'], res_nonexist.data['message'])
+
+    def test_41_password_reset_confirm_resets_password_properly(self):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.http import urlsafe_base64_encode
+        from django.utils.encoding import force_bytes
+
+        uid = urlsafe_base64_encode(force_bytes(self.employer1.pk))
+        token = default_token_generator.make_token(self.employer1)
+
+        # Confirm password reset
+        reset_payload = {
+            "uid": uid,
+            "token": token,
+            "password": "NewSecretPassword123!",
+            "confirm_password": "NewSecretPassword123!"
+        }
+        res = self.client.post(self.password_reset_confirm_url, reset_payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        # Verify old password stops working
+        res_old_login = self.client.post(self.login_url, {"email": "employer1@example.com", "password": "Password123!"}, format='json')
+        self.assertEqual(res_old_login.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Verify new password works
+        res_new_login = self.client.post(self.login_url, {"email": "employer1@example.com", "password": "NewSecretPassword123!"}, format='json')
+        self.assertEqual(res_new_login.status_code, status.HTTP_200_OK)

@@ -716,8 +716,7 @@ class HRProfile(models.Model):
         blank=True,
         null=True
     )
-    company_logo = models.CharField(
-        max_length=500,
+    company_logo = models.TextField(
         blank=True,
         null=True
     )

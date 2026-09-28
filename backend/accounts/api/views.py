@@ -1,4 +1,8 @@
-from ..models import HRProfile, Location, CandidateProfile, AdminProfile
+from django.utils import timezone
+from datetime import timedelta
+from rest_framework.pagination import PageNumberPagination
+from ..models import HRProfile, Location, CandidateProfile, AdminProfile, AuditEvent, EmployerVerification, EmployerTrust, Job, JobReview, JobCategory, Skill
+from ..services.audit_service import log_audit_event
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
@@ -26,7 +30,11 @@ from .serializers import (
     CandidateUserSerializer,
     EmployerProfileSerializer,
     PasswordResetRequestSerializer,
-    PasswordResetConfirmSerializer
+    PasswordResetConfirmSerializer,
+    AuditEventSerializer,
+    PrivilegedUserAccessReviewSerializer,
+    JobCategorySerializer,
+    SkillSerializer
 )
 
 User = get_user_model()
@@ -295,6 +303,29 @@ class PasswordResetRequestView(APIView):
                     )
                 except Exception:
                     pass
+
+                log_audit_event(
+                    actor=user,
+                    actor_email=user.email,
+                    action='PASSWORD_RESET_REQUEST',
+                    target_type='User',
+                    target_id=user.id,
+                    target_repr=user.email,
+                    outcome='SUCCESS',
+                    description=f"Password reset requested for {user.email}",
+                    request=request
+                )
+            else:
+                log_audit_event(
+                    actor=None,
+                    actor_email=email,
+                    action='PASSWORD_RESET_REQUEST',
+                    target_type='User',
+                    target_repr=email,
+                    outcome='SUCCESS',
+                    description=f"Password reset requested for {email} (user non-existent or inactive)",
+                    request=request
+                )
         except Exception:
             pass
 
@@ -340,6 +371,18 @@ class PasswordResetConfirmView(APIView):
 
         user.set_password(password)
         user.save()
+
+        log_audit_event(
+            actor=user,
+            actor_email=user.email,
+            action='PASSWORD_RESET_CONFIRM',
+            target_type='User',
+            target_id=user.id,
+            target_repr=user.email,
+            outcome='SUCCESS',
+            description=f"Password reset successfully completed for {user.email}",
+            request=request
+        )
 
         return Response(
             {"message": "Password reset successfully."},
@@ -469,4 +512,579 @@ class LocationListView(generics.ListCreateAPIView):
             else:
                 queryset = queryset.filter(parent_id=parent_id)
 
+        return queryset
+
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class AuditEventListView(generics.ListAPIView):
+    """
+    Super Admin–only paginated API with filters for date range, actor, action, outcome, and target.
+    """
+    serializer_class = AuditEventSerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = AuditEvent.objects.select_related('actor').order_by('-timestamp', '-id')
+
+        start_date = self.request.query_params.get('start_date', '').strip()
+        if start_date:
+            queryset = queryset.filter(timestamp__gte=start_date)
+
+        end_date = self.request.query_params.get('end_date', '').strip()
+        if end_date:
+            queryset = queryset.filter(timestamp__lte=end_date)
+
+        action = self.request.query_params.get('action', '').strip()
+        if action and action.lower() != 'all':
+            queryset = queryset.filter(action__iexact=action)
+
+        outcome = self.request.query_params.get('outcome', '').strip()
+        if outcome and outcome.lower() != 'all':
+            queryset = queryset.filter(outcome__iexact=outcome)
+
+        target_type = self.request.query_params.get('target_type', '').strip()
+        if target_type and target_type.lower() != 'all':
+            queryset = queryset.filter(target_type__iexact=target_type)
+
+        actor = self.request.query_params.get('actor', '').strip()
+        if actor:
+            queryset = queryset.filter(
+                Q(actor_email__icontains=actor) |
+                Q(actor__first_name__icontains=actor) |
+                Q(actor__last_name__icontains=actor) |
+                Q(actor__username__icontains=actor)
+            )
+
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(description__icontains=search) |
+                Q(target_repr__icontains=search) |
+                Q(actor_email__icontains=search) |
+                Q(action__icontains=search) |
+                Q(ip_address__icontains=search)
+            )
+
+        return queryset
+
+
+class SecurityPostureView(APIView):
+    """
+    Returns verified facts and counts for Security Posture.
+    Only accessible by Super Admin.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def get(self, request):
+        now = timezone.now()
+        since_24h = now - timedelta(hours=24)
+
+        total_users = User.objects.exclude(status=User.Status.DELETED).count()
+        active_users = User.objects.filter(status=User.Status.ACTIVE, is_active=True).count()
+        suspended_users = User.objects.filter(status=User.Status.SUSPENDED).count()
+        inactive_users = User.objects.filter(Q(status=User.Status.INACTIVE) | Q(is_active=False)).exclude(status=User.Status.SUSPENDED).count()
+        privileged_users = User.objects.filter(Q(role__in=[User.Role.SUPER_ADMIN, User.Role.ADMIN, User.Role.HR]) | Q(is_superuser=True)).exclude(status=User.Status.DELETED).count()
+
+        failed_logins_24h = AuditEvent.objects.filter(
+            action='LOGIN_FAILED',
+            timestamp__gte=since_24h
+        ).count()
+
+        recent_failed = AuditEvent.objects.filter(
+            action='LOGIN_FAILED'
+        ).order_by('-timestamp')[:5]
+
+        failed_logins_list = [
+            {
+                'id': ev.id,
+                'timestamp': ev.timestamp,
+                'actor_email': ev.actor_email or 'Unknown',
+                'description': ev.description,
+                'ip_address': ev.ip_address or 'Unknown',
+            } for ev in recent_failed
+        ]
+
+        return Response({
+            'accounts_summary': {
+                'total_users': total_users,
+                'active_users': active_users,
+                'suspended_users': suspended_users,
+                'inactive_users': inactive_users,
+                'privileged_users': privileged_users,
+            },
+            'auth_controls': {
+                'auth_mechanism': 'Stateless JWT (SimpleJWT standard pair)',
+                'access_token_lifetime': '5 minutes',
+                'refresh_token_lifetime': '1 day',
+                'session_revocation': 'Stateless JWT (Not configured)',
+                'mfa_status': 'Not configured',
+                'intrusion_alerts': 'Not configured',
+            },
+            'failed_logins_24h': failed_logins_24h,
+            'recent_failed_logins': failed_logins_list,
+        }, status=status.HTTP_200_OK)
+
+
+class AccessReviewsView(generics.ListAPIView):
+    """
+    Lists actual privileged users (SUPER_ADMIN, ADMIN, HR) and their roles / creator info.
+    Only accessible by Super Admin.
+    """
+    serializer_class = PrivilegedUserAccessReviewSerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        return User.objects.filter(
+            Q(role__in=[User.Role.SUPER_ADMIN, User.Role.ADMIN, User.Role.HR]) | Q(is_superuser=True)
+        ).exclude(
+            status=User.Status.DELETED
+        ).select_related('created_by').prefetch_related('user_roles__role').order_by('-created_at', '-id')
+
+
+class UserStatusUpdateView(APIView):
+    """
+    Super Admin endpoint to suspend, activate, or deactivate a user account.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def patch(self, request, user_id):
+        new_status = request.data.get('status', '').upper().strip()
+        if new_status not in [User.Status.ACTIVE, User.Status.SUSPENDED, User.Status.INACTIVE]:
+            return Response(
+                {"detail": "Invalid status. Allowed values: ACTIVE, SUSPENDED, INACTIVE."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            target_user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        old_status = target_user.status
+        target_user.status = new_status
+        target_user.is_active = (new_status == User.Status.ACTIVE)
+        target_user.save()
+
+        if hasattr(target_user, 'admin_profile'):
+            target_user.admin_profile.status = new_status
+            target_user.admin_profile.save()
+
+        log_audit_event(
+            actor=request.user,
+            action='USER_STATUS_CHANGE',
+            target_type='User',
+            target_id=target_user.id,
+            target_repr=f"{target_user.email} ({target_user.role})",
+            outcome='SUCCESS',
+            description=f"Super Admin changed user status from {old_status} to {new_status}",
+            request=request
+        )
+
+        return Response({
+            "message": f"User status updated to {new_status}.",
+            "user_id": target_user.id,
+            "status": target_user.status
+        }, status=status.HTTP_200_OK)
+
+
+class EmployerVerificationDecisionView(APIView):
+    """
+    Super Admin endpoint to approve or reject employer verification.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def post(self, request, employer_id):
+        decision = request.data.get('decision', '').upper().strip()
+        reason = request.data.get('rejection_reason', '') or request.data.get('notes', '')
+
+        if decision not in ['APPROVED', 'REJECTED']:
+            return Response(
+                {"detail": "Invalid decision. Allowed values: APPROVED, REJECTED."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            hr_profile = HRProfile.objects.get(pk=employer_id)
+        except HRProfile.DoesNotExist:
+            return Response({"detail": "Employer profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        hr_profile.verification_status = decision
+        hr_profile.save()
+
+        verification, _ = EmployerVerification.objects.get_or_create(employer=hr_profile)
+        verification.verification_status = decision
+        verification.reviewed_at = timezone.now()
+        verification.reviewed_by = request.user
+        verification.rejection_reason = reason if decision == 'REJECTED' else ''
+        verification.save()
+
+        log_audit_event(
+            actor=request.user,
+            action='EMPLOYER_VERIFY',
+            target_type='EmployerVerification',
+            target_id=verification.id,
+            target_repr=f"{hr_profile.company_name or hr_profile.user.email}",
+            outcome=decision,
+            description=f"Employer verification {decision.lower()} by Super Admin",
+            request=request
+        )
+
+        return Response({
+            "message": f"Employer verification updated to {decision}.",
+            "verification_status": hr_profile.verification_status
+        }, status=status.HTTP_200_OK)
+
+
+class JobReviewDecisionView(APIView):
+    """
+    Super Admin endpoint to review (approve/reject) a posted job.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def post(self, request, job_id):
+        action = request.data.get('action', '').upper().strip()
+        notes = request.data.get('notes', '') or request.data.get('reason', '')
+
+        if action not in ['APPROVED', 'REJECTED']:
+            return Response(
+                {"detail": "Invalid action. Allowed values: APPROVED, REJECTED."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            job = Job.objects.get(pk=job_id)
+        except Job.DoesNotExist:
+            return Response({"detail": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        job.status = 'PUBLISHED' if action == 'APPROVED' else 'REJECTED'
+        job.save()
+
+        JobReview.objects.create(
+            job=job,
+            reviewer=request.user,
+            action=action,
+            notes=notes
+        )
+
+        log_audit_event(
+            actor=request.user,
+            action='JOB_REVIEW',
+            target_type='Job',
+            target_id=job.id,
+            target_repr=f"Job #{job.id} - {job.title}",
+            outcome=action,
+            description=f"Job #{job.id} ({job.title}) {action.lower()} by Super Admin",
+            request=request
+        )
+
+        return Response({
+            "message": f"Job review updated to {action}.",
+            "job_status": job.status
+        }, status=status.HTTP_200_OK)
+
+
+class JobCategoryAdminListView(generics.ListCreateAPIView):
+    """
+    API endpoint for Super Admin to list and create JobCategories.
+    """
+    serializer_class = JobCategorySerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = JobCategory.objects.select_related('parent').order_by('sort_order', 'name', 'id')
+
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(description__icontains=search)
+            )
+
+        status_param = self.request.query_params.get('status', '').strip()
+        if status_param and status_param.lower() != 'all':
+            if status_param.lower() == 'active':
+                queryset = queryset.filter(is_active=True)
+            elif status_param.lower() == 'inactive':
+                queryset = queryset.filter(is_active=False)
+
+        parent_param = self.request.query_params.get('parent_id', '').strip()
+        if parent_param:
+            if parent_param.lower() == 'null' or parent_param == '0':
+                queryset = queryset.filter(parent__isnull=True)
+            else:
+                queryset = queryset.filter(parent_id=parent_param)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        category = serializer.save()
+        log_audit_event(
+            actor=self.request.user,
+            action='CATEGORY_CREATE',
+            target_type='JobCategory',
+            target_id=category.id,
+            target_repr=category.name,
+            outcome='SUCCESS',
+            description=f"Super Admin created category '{category.name}'",
+            request=self.request
+        )
+
+
+class JobCategoryAdminDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    API endpoint for Super Admin to view, update, or delete a JobCategory.
+    """
+    serializer_class = JobCategorySerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    queryset = JobCategory.objects.all()
+
+    def perform_update(self, serializer):
+        category = serializer.save()
+        log_audit_event(
+            actor=self.request.user,
+            action='CATEGORY_UPDATE',
+            target_type='JobCategory',
+            target_id=category.id,
+            target_repr=category.name,
+            outcome='SUCCESS',
+            description=f"Super Admin updated category '{category.name}'",
+            request=self.request
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        category = self.get_object()
+        if category.children.exists():
+            return Response(
+                {"detail": f"Cannot delete category '{category.name}' because it has {category.children.count()} subcategories. Deactivate it instead or reassign subcategories."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if category.skills.exists():
+            return Response(
+                {"detail": f"Cannot delete category '{category.name}' because {category.skills.count()} skills are linked to it."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if hasattr(category, 'jobs') and category.jobs.exists():
+            return Response(
+                {"detail": f"Cannot delete category '{category.name}' because {category.jobs.count()} jobs are using it."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        log_audit_event(
+            actor=request.user,
+            action='CATEGORY_DELETE',
+            target_type='JobCategory',
+            target_id=category.id,
+            target_repr=category.name,
+            outcome='SUCCESS',
+            description=f"Super Admin deleted category '{category.name}'",
+            request=request
+        )
+        return super().destroy(request, *args, **kwargs)
+
+
+class JobCategoryStatusUpdateView(APIView):
+    """
+    Super Admin endpoint to activate or deactivate a JobCategory.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def patch(self, request, pk):
+        try:
+            category = JobCategory.objects.get(pk=pk)
+        except JobCategory.DoesNotExist:
+            return Response({"detail": "Category not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_active = request.data.get('is_active')
+        if is_active is None:
+            return Response({"detail": "is_active boolean field is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        category.is_active = bool(is_active)
+        category.save()
+
+        action_text = "activated" if category.is_active else "deactivated"
+        log_audit_event(
+            actor=request.user,
+            action='CATEGORY_STATUS_CHANGE',
+            target_type='JobCategory',
+            target_id=category.id,
+            target_repr=category.name,
+            outcome='SUCCESS',
+            description=f"Super Admin {action_text} category '{category.name}'",
+            request=request
+        )
+
+        return Response({
+            "message": f"Category '{category.name}' {action_text}.",
+            "id": category.id,
+            "is_active": category.is_active
+        }, status=status.HTTP_200_OK)
+
+
+class SkillAdminListView(generics.ListCreateAPIView):
+    """
+    API endpoint for Super Admin to list and create Skills.
+    """
+    serializer_class = SkillSerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = Skill.objects.select_related('category').order_by('name', 'id')
+
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+
+        status_param = self.request.query_params.get('status', '').strip()
+        if status_param and status_param.lower() != 'all':
+            if status_param.lower() == 'active':
+                queryset = queryset.filter(is_active=True)
+            elif status_param.lower() == 'inactive':
+                queryset = queryset.filter(is_active=False)
+
+        cat_param = self.request.query_params.get('category_id', '').strip()
+        if cat_param:
+            if cat_param.lower() == 'uncategorized' or cat_param == '0' or cat_param.lower() == 'null':
+                queryset = queryset.filter(category__isnull=True)
+            else:
+                queryset = queryset.filter(category_id=cat_param)
+
+        return queryset
+
+    def perform_create(self, serializer):
+        skill = serializer.save()
+        log_audit_event(
+            actor=self.request.user,
+            action='SKILL_CREATE',
+            target_type='Skill',
+            target_id=skill.id,
+            target_repr=skill.name,
+            outcome='SUCCESS',
+            description=f"Super Admin created skill '{skill.name}'",
+            request=self.request
+        )
+
+
+class SkillAdminDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    API endpoint for Super Admin to view, update, or delete a Skill.
+    """
+    serializer_class = SkillSerializer
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    queryset = Skill.objects.all()
+
+    def perform_update(self, serializer):
+        skill = serializer.save()
+        log_audit_event(
+            actor=self.request.user,
+            action='SKILL_UPDATE',
+            target_type='Skill',
+            target_id=skill.id,
+            target_repr=skill.name,
+            outcome='SUCCESS',
+            description=f"Super Admin updated skill '{skill.name}'",
+            request=self.request
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        skill = self.get_object()
+        if skill.candidate_skills.exists():
+            return Response(
+                {"detail": f"Cannot delete skill '{skill.name}' because {skill.candidate_skills.count()} candidate profiles reference it. Deactivate it instead."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if skill.job_skills.exists():
+            return Response(
+                {"detail": f"Cannot delete skill '{skill.name}' because {skill.job_skills.count()} job postings reference it. Deactivate it instead."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        log_audit_event(
+            actor=request.user,
+            action='SKILL_DELETE',
+            target_type='Skill',
+            target_id=skill.id,
+            target_repr=skill.name,
+            outcome='SUCCESS',
+            description=f"Super Admin deleted skill '{skill.name}'",
+            request=request
+        )
+        return super().destroy(request, *args, **kwargs)
+
+
+class SkillStatusUpdateView(APIView):
+    """
+    Super Admin endpoint to activate or deactivate a Skill.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def patch(self, request, pk):
+        try:
+            skill = Skill.objects.get(pk=pk)
+        except Skill.DoesNotExist:
+            return Response({"detail": "Skill not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        is_active = request.data.get('is_active')
+        if is_active is None:
+            return Response({"detail": "is_active boolean field is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        skill.is_active = bool(is_active)
+        skill.save()
+
+        action_text = "activated" if skill.is_active else "deactivated"
+        log_audit_event(
+            actor=request.user,
+            action='SKILL_STATUS_CHANGE',
+            target_type='Skill',
+            target_id=skill.id,
+            target_repr=skill.name,
+            outcome='SUCCESS',
+            description=f"Super Admin {action_text} skill '{skill.name}'",
+            request=request
+        )
+
+        return Response({
+            "message": f"Skill '{skill.name}' {action_text}.",
+            "id": skill.id,
+            "is_active": skill.is_active
+        }, status=status.HTTP_200_OK)
+
+
+class JobCategoryPublicListView(generics.ListAPIView):
+    """
+    Public/Authenticated list of ACTIVE job categories for job-posting and filters.
+    """
+    serializer_class = JobCategorySerializer
+    permission_classes = (permissions.AllowAny,)
+
+    def get_queryset(self):
+        queryset = JobCategory.objects.filter(is_active=True).select_related('parent').order_by('sort_order', 'name')
+        parent_param = self.request.query_params.get('parent_id', '').strip()
+        if parent_param:
+            if parent_param.lower() == 'null' or parent_param == '0':
+                queryset = queryset.filter(parent__isnull=True)
+            else:
+                queryset = queryset.filter(parent_id=parent_param)
+        return queryset
+
+
+class SkillPublicListView(generics.ListAPIView):
+    """
+    Public/Authenticated list of ACTIVE skills for candidate profiles and job posting.
+    """
+    serializer_class = SkillSerializer
+    permission_classes = (permissions.AllowAny,)
+
+    def get_queryset(self):
+        queryset = Skill.objects.filter(is_active=True).select_related('category').order_by('name')
+        category_id = self.request.query_params.get('category_id', '').strip()
+        if category_id:
+            queryset = queryset.filter(category_id=category_id)
         return queryset

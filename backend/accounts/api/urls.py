@@ -15,6 +15,20 @@ from .views import (
     LocationListView,
     EmployerListView,
     CandidateListView,
+    AuditEventListView,
+    SecurityPostureView,
+    AccessReviewsView,
+    UserStatusUpdateView,
+    EmployerVerificationDecisionView,
+    JobReviewDecisionView,
+    JobCategoryAdminListView,
+    JobCategoryAdminDetailView,
+    JobCategoryStatusUpdateView,
+    SkillAdminListView,
+    SkillAdminDetailView,
+    SkillStatusUpdateView,
+    JobCategoryPublicListView,
+    SkillPublicListView,
 )
 
 urlpatterns = [
@@ -92,5 +106,75 @@ urlpatterns = [
         'locations/',
         LocationListView.as_view(),
         name='location_list'
+    ),
+    path(
+        'admin/audit-events/',
+        AuditEventListView.as_view(),
+        name='admin_audit_events'
+    ),
+    path(
+        'admin/security-posture/',
+        SecurityPostureView.as_view(),
+        name='admin_security_posture'
+    ),
+    path(
+        'admin/access-reviews/',
+        AccessReviewsView.as_view(),
+        name='admin_access_reviews'
+    ),
+    path(
+        'admin/users/<int:user_id>/status/',
+        UserStatusUpdateView.as_view(),
+        name='admin_user_status_update'
+    ),
+    path(
+        'admin/employers/<int:employer_id>/verify/',
+        EmployerVerificationDecisionView.as_view(),
+        name='admin_employer_verify_decision'
+    ),
+    path(
+        'admin/jobs/<int:job_id>/review/',
+        JobReviewDecisionView.as_view(),
+        name='admin_job_review_decision'
+    ),
+    path(
+        'admin/categories/',
+        JobCategoryAdminListView.as_view(),
+        name='admin_categories_list'
+    ),
+    path(
+        'admin/categories/<int:pk>/',
+        JobCategoryAdminDetailView.as_view(),
+        name='admin_categories_detail'
+    ),
+    path(
+        'admin/categories/<int:pk>/status/',
+        JobCategoryStatusUpdateView.as_view(),
+        name='admin_categories_status'
+    ),
+    path(
+        'admin/skills/',
+        SkillAdminListView.as_view(),
+        name='admin_skills_list'
+    ),
+    path(
+        'admin/skills/<int:pk>/',
+        SkillAdminDetailView.as_view(),
+        name='admin_skills_detail'
+    ),
+    path(
+        'admin/skills/<int:pk>/status/',
+        SkillStatusUpdateView.as_view(),
+        name='admin_skills_status'
+    ),
+    path(
+        'job-categories/',
+        JobCategoryPublicListView.as_view(),
+        name='public_categories_list'
+    ),
+    path(
+        'skills/',
+        SkillPublicListView.as_view(),
+        name='public_skills_list'
     ),
 ]

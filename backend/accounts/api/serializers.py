@@ -6,7 +6,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location
+from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location, AuditEvent, JobCategory
+from ..services.audit_service import log_audit_event
 
 User = get_user_model()
 
@@ -29,10 +30,127 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'role', 'created_at', 'updated_at')
 
 
+class JobCategorySerializer(serializers.ModelSerializer):
+    parent_name = serializers.CharField(source='parent.name', read_only=True, default=None)
+    children_count = serializers.SerializerMethodField()
+    skills_count = serializers.SerializerMethodField()
+    jobs_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = JobCategory
+        fields = (
+            'id',
+            'name',
+            'parent',
+            'parent_name',
+            'description',
+            'is_active',
+            'sort_order',
+            'children_count',
+            'skills_count',
+            'jobs_count',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_children_count(self, obj):
+        return obj.children.count()
+
+    def get_skills_count(self, obj):
+        return obj.skills.count()
+
+    def get_jobs_count(self, obj):
+        return obj.jobs.count() if hasattr(obj, 'jobs') else 0
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Category name is required.")
+        if len(name) < 2:
+            raise serializers.ValidationError("Category name must be at least 2 characters long.")
+        return name
+
+    def validate_description(self, value):
+        desc = (value or '').strip()
+        if not desc:
+            raise serializers.ValidationError("Description is required.")
+        if len(desc) < 3:
+            raise serializers.ValidationError("Description must be at least 3 characters long.")
+        return desc
+
+    def validate(self, attrs):
+        name = attrs.get('name', getattr(self.instance, 'name', '')).strip()
+        parent = attrs.get('parent', getattr(self.instance, 'parent', None))
+
+        qs = JobCategory.objects.filter(name__iexact=name)
+        if parent is None:
+            qs = qs.filter(parent__isnull=True)
+        else:
+            qs = qs.filter(parent=parent)
+
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+
+        if qs.exists():
+            parent_text = f"under category '{parent.name}'" if parent else "as a top-level category"
+            raise serializers.ValidationError({'name': f"A category named '{name}' already exists {parent_text}."})
+
+        if self.instance and parent:
+            if parent.pk == self.instance.pk:
+                raise serializers.ValidationError({'parent': "A category cannot be its own parent."})
+
+            curr = parent
+            visited = set()
+            while curr is not None:
+                if curr.pk in visited:
+                    break
+                visited.add(curr.pk)
+                if curr.pk == self.instance.pk:
+                    raise serializers.ValidationError({'parent': "Cannot select a child or descendant category as the parent."})
+                curr = curr.parent
+
+        return attrs
+
+
 class SkillSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True, default=None)
+    candidates_count = serializers.SerializerMethodField()
+    jobs_count = serializers.SerializerMethodField()
+
     class Meta:
         model = Skill
-        fields = ('id', 'name', 'created_at', 'updated_at')
+        fields = (
+            'id',
+            'name',
+            'category',
+            'category_name',
+            'is_active',
+            'candidates_count',
+            'jobs_count',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_candidates_count(self, obj):
+        return obj.candidate_skills.count()
+
+    def get_jobs_count(self, obj):
+        return obj.job_skills.count()
+
+    def validate_name(self, value):
+        name = value.strip()
+        if not name:
+            raise serializers.ValidationError("Skill name is required.")
+        if len(name) < 2:
+            raise serializers.ValidationError("Skill name must be at least 2 characters long.")
+
+        qs = Skill.objects.filter(name__iexact=name)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(f"A skill named '{name}' already exists.")
+
+        return name
 
 
 class CandidateSkillSerializer(serializers.ModelSerializer):
@@ -308,6 +426,17 @@ class CandidateRegisterSerializer(serializers.ModelSerializer):
             profile.phone = phone_number
             profile.save(update_fields=['phone', 'updated_at'])
 
+            log_audit_event(
+                actor=user,
+                action='USER_REGISTER',
+                target_type='User',
+                target_id=user.id,
+                target_repr=f"{user.email} (Candidate)",
+                outcome='SUCCESS',
+                description=f"Candidate registered account: {user.email}",
+                request=self.context.get('request')
+            )
+
         return user
 
     def to_representation(self, instance):
@@ -573,6 +702,17 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
                     defaults={'trust_level': EmployerTrust.TrustLevel.NEW, 'trust_score': 0, 'is_trusted': False}
                 )
 
+            log_audit_event(
+                actor=creator,
+                action='USER_CREATE',
+                target_type='User',
+                target_id=user.id,
+                target_repr=f"{user.email} ({user.role})",
+                outcome='SUCCESS',
+                description=f"Created {user.get_role_display()} account for {user.email}",
+                request=request
+            )
+
         return user
 
     def to_representation(self, instance):
@@ -754,6 +894,17 @@ class HRRegisterSerializer(serializers.ModelSerializer):
                 profile.designation = designation
             profile.save()
             
+        log_audit_event(
+            actor=user,
+            action='USER_CREATE',
+            target_type='User',
+            target_id=user.id,
+            target_repr=f"{user.email} (HR)",
+            outcome='SUCCESS',
+            description=f"HR registered account: {user.email}",
+            request=self.context.get('request')
+        )
+
         return user
 
 
@@ -793,6 +944,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         try:
             user = User.objects.get(email__iexact=email)
             if not user.is_active or user.status != User.Status.ACTIVE:
+                log_audit_event(
+                    actor=user,
+                    actor_email=email,
+                    action='LOGIN_FAILED',
+                    target_type='User',
+                    target_id=user.id,
+                    target_repr=email,
+                    outcome='FAILED',
+                    description=f"Failed login attempt for {email}: Account is inactive or suspended",
+                    request=self.context.get('request')
+                )
                 raise serializers.ValidationError({"detail": "User account is inactive or suspended."})
         except User.DoesNotExist:
             pass
@@ -802,7 +964,28 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         self.user = authenticate(username=email, password=password)
         
         if not self.user:
+            log_audit_event(
+                actor=None,
+                actor_email=email,
+                action='LOGIN_FAILED',
+                target_type='User',
+                target_repr=email,
+                outcome='FAILED',
+                description=f"Failed login attempt for {email}: Invalid credentials",
+                request=self.context.get('request')
+            )
             raise serializers.ValidationError({"detail": "Invalid email or password."})
+
+        log_audit_event(
+            actor=self.user,
+            action='LOGIN_SUCCESS',
+            target_type='User',
+            target_id=self.user.id,
+            target_repr=self.user.email,
+            outcome='SUCCESS',
+            description=f"User {self.user.email} logged in successfully",
+            request=self.context.get('request')
+        )
 
         # Generate tokens
         refresh = self.get_token(self.user)
@@ -1159,3 +1342,72 @@ class EmployerUserSerializer(serializers.ModelSerializer):
 
     def get_name(self, obj):
         return self.get_full_name(obj)
+
+
+class AuditEventSerializer(serializers.ModelSerializer):
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditEvent
+        fields = (
+            'id',
+            'timestamp',
+            'actor',
+            'actor_email',
+            'actor_name',
+            'action',
+            'target_type',
+            'target_id',
+            'target_repr',
+            'outcome',
+            'description',
+            'ip_address',
+        )
+
+    def get_actor_name(self, obj):
+        if obj.actor:
+            name = f"{obj.actor.first_name} {obj.actor.last_name}".strip()
+            return name if name else obj.actor.username
+        return obj.actor_email or "System / Anonymous"
+
+
+class PrivilegedUserAccessReviewSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    created_by_info = serializers.SerializerMethodField()
+    roles_assigned = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'username',
+            'email',
+            'name',
+            'role',
+            'status',
+            'is_active',
+            'is_superuser',
+            'created_at',
+            'created_by_info',
+            'roles_assigned',
+        )
+
+    def get_name(self, obj):
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name if name else obj.username
+
+    def get_created_by_info(self, obj):
+        if obj.created_by:
+            name = f"{obj.created_by.first_name} {obj.created_by.last_name}".strip() or obj.created_by.username
+            return {'id': obj.created_by.id, 'email': obj.created_by.email, 'name': name}
+        # Fallback to searching AuditEvent for USER_CREATE target_id
+        event = AuditEvent.objects.filter(action='USER_CREATE', target_type='User', target_id=str(obj.id)).first()
+        if event and event.actor:
+            name = f"{event.actor.first_name} {event.actor.last_name}".strip() or event.actor.username
+            return {'id': event.actor.id, 'email': event.actor.email, 'name': name}
+        elif event and event.actor_email:
+            return {'id': None, 'email': event.actor_email, 'name': event.actor_email}
+        return None
+
+    def get_roles_assigned(self, obj):
+        return list(obj.user_roles.values_list('role__name', flat=True))

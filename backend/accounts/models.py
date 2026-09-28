@@ -609,6 +609,16 @@ class Skill(models.Model):
         max_length=100,
         unique=True
     )
+    category = models.ForeignKey(
+        'JobCategory',
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="skills"
+    )
+    is_active = models.BooleanField(
+        default=True
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )
@@ -1260,6 +1270,41 @@ class CandidateActivity(models.Model):
         return f"{self.candidate.user.username} - {self.activity_type}"
 
 
+class AuditEvent(models.Model):
+    class Outcome(models.TextChoices):
+        SUCCESS = "SUCCESS", "Success"
+        FAILURE = "FAILURE", "Failure"
+
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="audit_events"
+    )
+    actor_email = models.CharField(max_length=255, blank=True, null=True)
+    action = models.CharField(max_length=100, db_index=True)
+    target_type = models.CharField(max_length=50, blank=True, null=True, db_index=True)
+    target_id = models.CharField(max_length=100, blank=True, null=True)
+    target_repr = models.CharField(max_length=255, blank=True, null=True)
+    outcome = models.CharField(
+        max_length=20,
+        choices=Outcome.choices,
+        default=Outcome.SUCCESS,
+        db_index=True
+    )
+    description = models.TextField(blank=True, null=True)
+    ip_address = models.GenericIPAddressField(blank=True, null=True)
+
+    class Meta:
+        ordering = ('-timestamp',)
+        verbose_name_plural = 'audit events'
+
+    def __str__(self):
+        return f"[{self.timestamp}] {self.action} by {self.actor_email or 'System'} - {self.outcome}"
+
+
 @receiver(post_save, sender=User)
 def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
     if raw:
@@ -1270,6 +1315,7 @@ def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
                 name=instance.role,
                 defaults={"description": f"{instance.get_role_display()} role"}
             )
+            UserRole.objects.filter(user=instance).exclude(role=role_obj).delete()
             UserRole.objects.get_or_create(
                 user=instance,
                 role=role_obj

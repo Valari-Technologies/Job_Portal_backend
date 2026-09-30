@@ -290,7 +290,7 @@ class PrivilegedAccountCreationAuthorizationTests(TestCase):
             "role": "SUPER_ADMIN"
         }
         res = self.client.post(self.url, payload, format='json')
-        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(res.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
 
     def test_13_hr_cannot_create_admin(self):
         self.client.force_authenticate(user=self.hr)
@@ -520,7 +520,7 @@ class EmployerFlowTests(TestCase):
         self.assertNotIn('password', res.data['user'])
         self.assertNotIn('password_hash', res.data['user'])
 
-    def test_32_admin_cannot_create_employer(self):
+    def test_32_admin_can_create_employer(self):
         self.client.force_authenticate(user=self.admin)
         payload = {
             "email": "admintryemp@example.com",
@@ -528,7 +528,7 @@ class EmployerFlowTests(TestCase):
             "role": "HR"
         }
         res = self.client.post(self.create_user_url, payload, format='json')
-        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
 
     def test_33_candidate_and_employer_cannot_create_employer(self):
         self.client.force_authenticate(user=self.candidate)

@@ -749,12 +749,14 @@ class HRProfile(models.Model):
     verification_status = models.CharField(
         max_length=50,
         blank=True,
-        null=True
+        null=True,
+        default='UNSUBMITTED'
     )
     trust_level = models.CharField(
         max_length=50,
         blank=True,
-        null=True
+        null=True,
+        default='NEW'
     )
     created_at = models.DateTimeField(
         auto_now_add=True
@@ -763,6 +765,13 @@ class HRProfile(models.Model):
         auto_now=True
     )
 
+    def is_profile_complete(self):
+        return bool(
+            self.company_name and
+            (self.company_phone or self.phone or self.company_email or (self.user and self.user.email)) and
+            (self.company_description or self.company_address or self.location)
+        )
+
     def __str__(self):
         return f"{self.user.username}'s HR Profile"
 
@@ -770,8 +779,11 @@ class HRProfile(models.Model):
 class Job(models.Model):
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
+        PENDING_REVIEW = "PENDING_REVIEW", "Pending Review"
         PUBLISHED = "PUBLISHED", "Published"
+        REJECTED = "REJECTED", "Rejected"
         CLOSED = "CLOSED", "Closed"
+        EXPIRED = "EXPIRED", "Expired"
 
     # PROTECT: removing an HR profile must not silently destroy their jobs,
     # the applications against them, or the activity audit trail. Jobs are
@@ -1024,6 +1036,7 @@ class ApplicationActivity(models.Model):
 
 class EmployerVerification(models.Model):
     class VerificationStatus(models.TextChoices):
+        UNSUBMITTED = "UNSUBMITTED", "Unsubmitted"
         PENDING = "PENDING", "Pending"
         APPROVED = "APPROVED", "Approved"
         REJECTED = "REJECTED", "Rejected"
@@ -1033,7 +1046,7 @@ class EmployerVerification(models.Model):
     verification_status = models.CharField(
         max_length=50,
         choices=VerificationStatus.choices,
-        default=VerificationStatus.PENDING
+        default=VerificationStatus.UNSUBMITTED
     )
     submitted_at = models.DateTimeField(auto_now_add=True)
     reviewed_at = models.DateTimeField(blank=True, null=True)
@@ -1191,6 +1204,7 @@ class JobReport(models.Model):
     status = models.CharField(max_length=50, choices=Status.choices, default=Status.PENDING)
     reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True, related_name="reviewed_job_reports")
     reviewed_at = models.DateTimeField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

@@ -4,9 +4,15 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from django.db import IntegrityError, transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from ..models import Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience, Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location, AuditEvent, JobCategory
+from ..models import (
+    Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience,
+    Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location,
+    AuditEvent, JobCategory, Job, JobReview, JobLocation, JobSkill, WorkMode, EmploymentType,
+    Notification, JobReport
+)
 from ..services.audit_service import log_audit_event
 
 User = get_user_model()
@@ -1422,3 +1428,368 @@ class PrivilegedUserAccessReviewSerializer(serializers.ModelSerializer):
 
     def get_roles_assigned(self, obj):
         return list(obj.user_roles.values_list('role__name', flat=True))
+
+
+class EmployerVerificationHistorySerializer(serializers.ModelSerializer):
+    reviewed_by_name = serializers.SerializerMethodField()
+    reviewed_by_email = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmployerVerification
+        fields = (
+            'id',
+            'verification_status',
+            'submitted_at',
+            'reviewed_at',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_by_email',
+            'rejection_reason',
+            'notes',
+        )
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            return f"{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}".strip() or obj.reviewed_by.username
+        return None
+
+    def get_reviewed_by_email(self, obj):
+        return obj.reviewed_by.email if obj.reviewed_by else None
+
+
+class EmployerVerificationQueueSerializer(serializers.ModelSerializer):
+    employer_id = serializers.IntegerField(source='id')
+    user_id = serializers.IntegerField(source='user.id')
+    company_name = serializers.CharField()
+    employer_name = serializers.SerializerMethodField()
+    email = serializers.EmailField(source='user.email')
+    phone = serializers.SerializerMethodField()
+    account_status = serializers.CharField(source='user.status')
+    location_details = serializers.SerializerMethodField()
+    is_profile_complete = serializers.SerializerMethodField()
+    trust_info = serializers.SerializerMethodField()
+    latest_verification = serializers.SerializerMethodField()
+    verification_history = serializers.SerializerMethodField()
+
+    class Meta:
+        model = HRProfile
+        fields = (
+            'employer_id',
+            'user_id',
+            'company_name',
+            'employer_name',
+            'email',
+            'phone',
+            'company_phone',
+            'company_website',
+            'company_address',
+            'company_description',
+            'company_logo',
+            'designation',
+            'verification_status',
+            'account_status',
+            'location',
+            'location_details',
+            'is_profile_complete',
+            'trust_info',
+            'latest_verification',
+            'verification_history',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_employer_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+
+    def get_phone(self, obj):
+        return obj.company_phone or obj.phone or obj.user.phone_number
+
+    def get_is_profile_complete(self, obj):
+        return obj.is_profile_complete()
+
+    def get_location_details(self, obj):
+        if obj.location:
+            return {
+                'id': obj.location.id,
+                'name': obj.location.name,
+                'full_path': obj.location.get_full_path(),
+                'state': obj.location.get_state(),
+                'district': obj.location.get_district(),
+            }
+        return None
+
+    def get_trust_info(self, obj):
+        if hasattr(obj, 'trust') and obj.trust:
+            return {
+                'trust_level': obj.trust.trust_level,
+                'jobs_posted': obj.trust.jobs_posted,
+                'jobs_approved': obj.trust.jobs_approved,
+                'jobs_rejected': obj.trust.jobs_rejected,
+                'trust_score': obj.trust.trust_score,
+                'is_trusted': obj.trust.is_trusted,
+            }
+        return {'trust_level': 'NEW', 'is_trusted': False, 'trust_score': 0}
+
+    def get_latest_verification(self, obj):
+        latest = obj.verifications.order_by('-submitted_at', '-id').first()
+        if latest:
+            return EmployerVerificationHistorySerializer(latest).data
+        return None
+
+    def get_verification_history(self, obj):
+        verifications = obj.verifications.order_by('-submitted_at', '-id')
+        return EmployerVerificationHistorySerializer(verifications, many=True).data
+
+
+class JobReviewHistorySerializer(serializers.ModelSerializer):
+    reviewer_name = serializers.SerializerMethodField()
+    reviewer_email = serializers.SerializerMethodField()
+
+    class Meta:
+        model = JobReview
+        fields = (
+            'id',
+            'action',
+            'reason',
+            'notes',
+            'reviewer',
+            'reviewer_name',
+            'reviewer_email',
+            'created_at',
+        )
+
+    def get_reviewer_name(self, obj):
+        if obj.reviewer:
+            return f"{obj.reviewer.first_name} {obj.reviewer.last_name}".strip() or obj.reviewer.username
+        return None
+
+    def get_reviewer_email(self, obj):
+        return obj.reviewer.email if obj.reviewer else None
+
+
+class JobReviewQueueSerializer(serializers.ModelSerializer):
+    employer = serializers.SerializerMethodField()
+    category_info = serializers.SerializerMethodField()
+    work_mode_info = serializers.SerializerMethodField()
+    locations = serializers.SerializerMethodField()
+    skills = serializers.SerializerMethodField()
+    review_history = serializers.SerializerMethodField()
+    latest_review = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Job
+        fields = (
+            'id',
+            'title',
+            'description',
+            'responsibilities',
+            'requirements',
+            'education_requirement',
+            'experience_min',
+            'experience_max',
+            'experience_required',
+            'salary_min',
+            'salary_max',
+            'salary_period',
+            'status',
+            'application_type',
+            'application_deadline',
+            'published_at',
+            'closed_at',
+            'created_at',
+            'updated_at',
+            'employer',
+            'category',
+            'category_info',
+            'work_mode',
+            'work_mode_info',
+            'locations',
+            'skills',
+            'review_history',
+            'latest_review',
+        )
+
+    def get_employer(self, obj):
+        hr = obj.hr
+        if not hr:
+            return None
+        trust_level = hr.trust.trust_level if hasattr(hr, 'trust') and hr.trust else 'NEW'
+        is_trusted = hr.trust.is_trusted if hasattr(hr, 'trust') and hr.trust else False
+        return {
+            'employer_id': hr.id,
+            'user_id': hr.user.id,
+            'company_name': hr.company_name or f"Company #{hr.id}",
+            'company_logo': hr.company_logo,
+            'contact_name': f"{hr.user.first_name} {hr.user.last_name}".strip() or hr.user.username,
+            'email': hr.user.email,
+            'verification_status': hr.verification_status,
+            'account_status': hr.user.status,
+            'trust_level': trust_level,
+            'is_trusted': is_trusted,
+        }
+
+    def get_category_info(self, obj):
+        if obj.category:
+            return {
+                'id': obj.category.id,
+                'name': obj.category.name,
+                'parent_id': obj.category.parent.id if obj.category.parent else None,
+                'parent_name': obj.category.parent.name if obj.category.parent else None,
+            }
+        return None
+
+    def get_work_mode_info(self, obj):
+        if obj.work_mode:
+            return {
+                'id': obj.work_mode.id,
+                'name': obj.work_mode.name,
+            }
+        return None
+
+    def get_locations(self, obj):
+        locs = []
+        for jl in obj.job_locations.select_related('location', 'location__parent', 'location__parent__parent').all():
+            loc = jl.location
+            locs.append({
+                'id': loc.id,
+                'name': loc.name,
+                'location_type': loc.location_type,
+                'full_path': loc.get_full_path(),
+                'state': loc.get_state(),
+                'district': loc.get_district(),
+            })
+        return locs
+
+    def get_skills(self, obj):
+        skills_list = []
+        for js in obj.job_skills.select_related('skill').all():
+            skills_list.append({
+                'id': js.skill.id,
+                'name': js.skill.name,
+                'is_required': js.is_required,
+            })
+        return skills_list
+
+    def get_review_history(self, obj):
+        reviews = obj.reviews.order_by('-created_at', '-id')
+        return JobReviewHistorySerializer(reviews, many=True).data
+
+    def get_latest_review(self, obj):
+        latest = obj.reviews.order_by('-created_at', '-id').first()
+        if latest:
+            return JobReviewHistorySerializer(latest).data
+        return None
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    formatted_time = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = (
+            'id',
+            'user_id',
+            'notification_type',
+            'title',
+            'message',
+            'reference_type',
+            'reference_id',
+            'is_read',
+            'created_at',
+            'formatted_time',
+        )
+        read_only_fields = ('id', 'user_id', 'created_at')
+
+    def get_formatted_time(self, obj):
+        if not obj.created_at:
+            return 'Just now'
+        now = timezone.now()
+        diff = now - obj.created_at
+        if diff.total_seconds() < 60:
+            return 'Just now'
+        elif diff.total_seconds() < 3600:
+            mins = int(diff.total_seconds() // 60)
+            return f'{mins} min{"s" if mins > 1 else ""} ago'
+        elif diff.total_seconds() < 86400:
+            hours = int(diff.total_seconds() // 3600)
+            return f'{hours} hour{"s" if hours > 1 else ""} ago'
+        else:
+            days = int(diff.total_seconds() // 86400)
+            return f'{days} day{"s" if days > 1 else ""} ago'
+
+
+class JobReportSerializer(serializers.ModelSerializer):
+    job_details = serializers.SerializerMethodField()
+    reporter_details = serializers.SerializerMethodField()
+    reviewer_details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = JobReport
+        fields = (
+            'id',
+            'job',
+            'job_details',
+            'reported_by',
+            'reporter_details',
+            'reason',
+            'description',
+            'status',
+            'reviewed_by',
+            'reviewer_details',
+            'reviewed_at',
+            'notes',
+            'created_at',
+        )
+        read_only_fields = ('id', 'reported_by', 'reviewed_by', 'reviewed_at', 'created_at')
+
+    def get_job_details(self, obj):
+        if not obj.job:
+            return None
+        j = obj.job
+        hr = j.hr
+        locs = []
+        for jl in j.job_locations.select_related('location').all():
+            locs.append({
+                'id': jl.location.id,
+                'name': jl.location.name,
+                'full_path': jl.location.get_full_path(),
+                'state': jl.location.get_state(),
+                'district': jl.location.get_district(),
+            })
+        return {
+            'id': j.id,
+            'title': j.title,
+            'status': j.status,
+            'company_name': hr.company_name if hr else 'Unknown',
+            'employer_id': hr.id if hr else None,
+            'employer_email': hr.user.email if hr and hr.user else None,
+            'employer_verification_status': hr.verification_status if hr else None,
+            'category_name': j.category.name if j.category else None,
+            'work_mode_name': j.work_mode.name if j.work_mode else None,
+            'locations': locs,
+        }
+
+    def get_reporter_details(self, obj):
+        if not obj.reported_by:
+            return None
+        u = obj.reported_by
+        name = f"{u.first_name} {u.last_name}".strip() or u.username
+        return {
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'name': name,
+            'role': u.role,
+        }
+
+    def get_reviewer_details(self, obj):
+        if not obj.reviewed_by:
+            return None
+        u = obj.reviewed_by
+        name = f"{u.first_name} {u.last_name}".strip() or u.username
+        return {
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'name': name,
+        }

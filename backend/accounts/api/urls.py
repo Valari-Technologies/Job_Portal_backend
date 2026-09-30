@@ -21,7 +21,11 @@ from .views import (
     AccessReviewsView,
     UserStatusUpdateView,
     EmployerVerificationDecisionView,
+    EmployerVerificationQueueView,
+    EmployerSubmitVerificationView,
     JobReviewDecisionView,
+    JobReviewQueueView,
+    EmployerJobSubmitView,
     JobCategoryAdminListView,
     JobCategoryAdminDetailView,
     JobCategoryStatusUpdateView,
@@ -30,6 +34,13 @@ from .views import (
     SkillStatusUpdateView,
     JobCategoryPublicListView,
     SkillPublicListView,
+    NotificationListView,
+    NotificationMarkReadView,
+    NotificationMarkAllReadView,
+    NotificationUnreadCountView,
+    JobReportCreateView,
+    JobReportAdminListView,
+    JobReportDecisionView,
 )
 
 urlpatterns = [
@@ -134,14 +145,44 @@ urlpatterns = [
         name='admin_user_status_update'
     ),
     path(
+        'admin/employer-verifications/',
+        EmployerVerificationQueueView.as_view(),
+        name='admin_employer_verification_queue'
+    ),
+    path(
+        'admin/employers/verification-queue/',
+        EmployerVerificationQueueView.as_view(),
+        name='admin_employer_verification_queue_alias'
+    ),
+    path(
         'admin/employers/<int:employer_id>/verify/',
         EmployerVerificationDecisionView.as_view(),
         name='admin_employer_verify_decision'
     ),
     path(
+        'employer/submit-verification/',
+        EmployerSubmitVerificationView.as_view(),
+        name='employer_submit_verification'
+    ),
+    path(
+        'admin/job-reviews/',
+        JobReviewQueueView.as_view(),
+        name='admin_job_review_queue'
+    ),
+    path(
+        'admin/jobs/review-queue/',
+        JobReviewQueueView.as_view(),
+        name='admin_job_review_queue_alias'
+    ),
+    path(
         'admin/jobs/<int:job_id>/review/',
         JobReviewDecisionView.as_view(),
         name='admin_job_review_decision'
+    ),
+    path(
+        'employer/jobs/<int:job_id>/submit/',
+        EmployerJobSubmitView.as_view(),
+        name='employer_job_submit'
     ),
     path(
         'admin/categories/',
@@ -182,5 +223,44 @@ urlpatterns = [
         'skills/',
         SkillPublicListView.as_view(),
         name='public_skills_list'
+    ),
+
+    # Notifications
+    path(
+        'notifications/',
+        NotificationListView.as_view(),
+        name='notification_list'
+    ),
+    path(
+        'notifications/<int:pk>/mark-read/',
+        NotificationMarkReadView.as_view(),
+        name='notification_mark_read'
+    ),
+    path(
+        'notifications/mark-all-read/',
+        NotificationMarkAllReadView.as_view(),
+        name='notification_mark_all_read'
+    ),
+    path(
+        'notifications/unread-count/',
+        NotificationUnreadCountView.as_view(),
+        name='notification_unread_count'
+    ),
+
+    # Job Reports
+    path(
+        'job-reports/',
+        JobReportCreateView.as_view(),
+        name='job_report_create'
+    ),
+    path(
+        'admin/reports/',
+        JobReportAdminListView.as_view(),
+        name='admin_reports_list'
+    ),
+    path(
+        'admin/reports/<int:report_id>/decision/',
+        JobReportDecisionView.as_view(),
+        name='admin_report_decision'
     ),
 ]

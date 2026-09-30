@@ -1,7 +1,11 @@
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.pagination import PageNumberPagination
-from ..models import HRProfile, Location, CandidateProfile, AdminProfile, AuditEvent, EmployerVerification, EmployerTrust, Job, JobReview, JobCategory, Skill
+from django.db import transaction
+from ..models import (
+    HRProfile, Location, CandidateProfile, AdminProfile, AuditEvent,
+    EmployerVerification, EmployerTrust, Job, JobReview, JobCategory, Skill, Notification, JobReport
+)
 from ..services.audit_service import log_audit_event
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
@@ -16,7 +20,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .permissions import IsSuperAdminRole, IsAdminRole
+from .permissions import IsSuperAdminRole, IsAdminRole, IsHRRole
 from .serializers import (
     CandidateRegisterSerializer,
     HRRegisterSerializer,
@@ -33,8 +37,14 @@ from .serializers import (
     PasswordResetConfirmSerializer,
     AuditEventSerializer,
     PrivilegedUserAccessReviewSerializer,
+    EmployerVerificationQueueSerializer,
+    EmployerVerificationHistorySerializer,
+    JobReviewQueueSerializer,
+    JobReviewHistorySerializer,
     JobCategorySerializer,
-    SkillSerializer
+    SkillSerializer,
+    NotificationSerializer,
+    JobReportSerializer,
 )
 
 User = get_user_model()
@@ -784,63 +794,283 @@ class UserStatusUpdateView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class EmployerVerificationQueueView(generics.ListAPIView):
+    """
+    Paginated review queue for Employer Verification requests.
+    Supports filtering by verification status and search.
+    """
+    serializer_class = EmployerVerificationQueueSerializer
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = HRProfile.objects.select_related(
+            'user', 'location', 'trust'
+        ).prefetch_related(
+            'verifications', 'verifications__reviewed_by'
+        ).exclude(user__status=User.Status.DELETED).order_by('-updated_at', '-id')
+
+        # Status filtering
+        status_param = self.request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            if status_param == 'PENDING':
+                queryset = queryset.filter(
+                    Q(verification_status='PENDING') | Q(verifications__verification_status='PENDING')
+                ).distinct()
+            else:
+                queryset = queryset.filter(verification_status=status_param)
+        else:
+            if 'status' not in self.request.query_params:
+                queryset = queryset.filter(
+                    Q(verification_status='PENDING') | Q(verifications__verification_status='PENDING')
+                ).distinct()
+
+        # Search filtering
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(company_name__icontains=search) |
+                Q(user__email__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(company_phone__icontains=search) |
+                Q(phone__icontains=search) |
+                Q(company_address__icontains=search) |
+                Q(location__name__icontains=search)
+            ).distinct()
+
+        return queryset
+
+
 class EmployerVerificationDecisionView(APIView):
     """
-    Super Admin endpoint to approve or reject employer verification.
+    Endpoint for Admin / Super Admin to approve, reject, or suspend an employer verification.
+    Enforces authorization & prevents self-approval.
     """
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def post(self, request, employer_id):
         decision = request.data.get('decision', '').upper().strip()
-        reason = request.data.get('rejection_reason', '') or request.data.get('notes', '')
+        reason = request.data.get('rejection_reason', '') or request.data.get('reason', '') or request.data.get('notes', '')
+        notes = request.data.get('notes', '') or reason
 
-        if decision not in ['APPROVED', 'REJECTED']:
+        if decision not in ['APPROVED', 'REJECTED', 'SUSPENDED']:
             return Response(
-                {"detail": "Invalid decision. Allowed values: APPROVED, REJECTED."},
+                {"detail": "Invalid decision. Allowed values: APPROVED, REJECTED, SUSPENDED."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            hr_profile = HRProfile.objects.get(pk=employer_id)
+            hr_profile = HRProfile.objects.select_related('user').get(pk=employer_id)
         except HRProfile.DoesNotExist:
             return Response({"detail": "Employer profile not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        hr_profile.verification_status = decision
-        hr_profile.save()
+        # Employer MUST NOT approve/verify their own request
+        if request.user.id == hr_profile.user.id:
+            return Response(
+                {"detail": "Employers are not authorized to verify or approve their own account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        verification, _ = EmployerVerification.objects.get_or_create(employer=hr_profile)
-        verification.verification_status = decision
-        verification.reviewed_at = timezone.now()
-        verification.reviewed_by = request.user
-        verification.rejection_reason = reason if decision == 'REJECTED' else ''
-        verification.save()
+        if decision == 'REJECTED' and not reason:
+            return Response(
+                {"detail": "A meaningful rejection reason is required when rejecting an employer verification."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        log_audit_event(
-            actor=request.user,
-            action='EMPLOYER_VERIFY',
-            target_type='EmployerVerification',
-            target_id=verification.id,
-            target_repr=f"{hr_profile.company_name or hr_profile.user.email}",
-            outcome=decision,
-            description=f"Employer verification {decision.lower()} by Super Admin",
-            request=request
-        )
+        if decision == 'SUSPENDED' and not reason:
+            return Response(
+                {"detail": "A reason is required when suspending an employer account."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            hr_profile.verification_status = decision
+            hr_profile.save()
+
+            user = hr_profile.user
+            if decision == 'SUSPENDED':
+                user.status = User.Status.SUSPENDED
+                user.is_active = False
+                user.save()
+            elif user.status == User.Status.SUSPENDED:
+                user.status = User.Status.ACTIVE
+                user.is_active = True
+                user.save()
+
+            # Update existing PENDING verification row for this employer if available, otherwise create record
+            verification = EmployerVerification.objects.filter(
+                employer=hr_profile,
+                verification_status=EmployerVerification.VerificationStatus.PENDING
+            ).order_by('-submitted_at', '-id').first()
+
+            if verification:
+                verification.verification_status = decision
+                verification.reviewed_at = timezone.now()
+                verification.reviewed_by = request.user
+                verification.rejection_reason = reason if decision in ['REJECTED', 'SUSPENDED'] else ''
+                verification.notes = notes
+                verification.save()
+            else:
+                verification = EmployerVerification.objects.create(
+                    employer=hr_profile,
+                    verification_status=decision,
+                    reviewed_at=timezone.now(),
+                    reviewed_by=request.user,
+                    rejection_reason=reason if decision in ['REJECTED', 'SUSPENDED'] else '',
+                    notes=notes
+                )
+
+            # Ensure EmployerTrust exists
+            trust, _ = EmployerTrust.objects.get_or_create(employer=hr_profile)
+            if decision == 'APPROVED':
+                trust.trust_level = EmployerTrust.TrustLevel.BASIC if trust.trust_level == 'NEW' else trust.trust_level
+                trust.save()
+
+            # Send Notification if enabled
+            Notification.objects.create(
+                user=user,
+                notification_type='EMPLOYER_VERIFICATION_DECISION',
+                title=f"Employer Verification {decision.capitalize()}",
+                message=f"Your employer account verification status is now {decision}." + (f" Reason: {reason}" if reason else ""),
+                reference_type='EmployerVerification',
+                reference_id=verification.id
+            )
+
+            log_audit_event(
+                actor=request.user,
+                action='EMPLOYER_VERIFY',
+                target_type='EmployerVerification',
+                target_id=verification.id,
+                target_repr=f"{hr_profile.company_name or user.email}",
+                outcome=decision,
+                description=f"Employer verification set to {decision} by {request.user.email}",
+                request=request
+            )
 
         return Response({
             "message": f"Employer verification updated to {decision}.",
-            "verification_status": hr_profile.verification_status
+            "verification_status": hr_profile.verification_status,
+            "account_status": hr_profile.user.status,
+            "verification": EmployerVerificationHistorySerializer(verification).data
         }, status=status.HTTP_200_OK)
+
+
+class EmployerSubmitVerificationView(APIView):
+    """
+    Endpoint for HR/Employer to submit or resubmit company details for verification review.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsHRRole)
+
+    def post(self, request):
+        try:
+            hr_profile = HRProfile.objects.get(user=request.user)
+        except HRProfile.DoesNotExist:
+            return Response({"detail": "HR profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not hr_profile.is_profile_complete():
+            return Response(
+                {"detail": "Please complete your company details (company name, contact email/phone, and address/description/location) before submitting for verification."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            hr_profile.verification_status = 'PENDING'
+            hr_profile.save()
+
+            # Create a NEW verification submission row (retaining prior decision history rows)
+            verification = EmployerVerification.objects.create(
+                employer=hr_profile,
+                verification_status=EmployerVerification.VerificationStatus.PENDING,
+                submitted_at=timezone.now()
+            )
+
+            # Notify Super Admins / Moderators
+            notify_super_admins_and_moderators(
+                notification_type='EMPLOYER_VERIFICATION_SUBMISSION',
+                title='New Employer Verification Request',
+                message=f"Employer '{hr_profile.company_name or request.user.email}' submitted company details for verification.",
+                reference_type='EmployerVerification',
+                reference_id=verification.id
+            )
+
+            log_audit_event(
+                actor=request.user,
+                action='EMPLOYER_VERIFY_SUBMIT',
+                target_type='EmployerVerification',
+                target_id=verification.id,
+                target_repr=f"{hr_profile.company_name or request.user.email}",
+                outcome='SUCCESS',
+                description=f"Employer submitted company information for verification",
+                request=request
+            )
+
+        return Response({
+            "message": "Company information submitted for verification successfully.",
+            "verification_status": hr_profile.verification_status,
+            "verification_id": verification.id
+        }, status=status.HTTP_200_OK)
+
+
+class JobReviewQueueView(generics.ListAPIView):
+    """
+    Paginated review queue for Job Submissions pending moderation.
+    Excludes DRAFT jobs by default.
+    """
+    serializer_class = JobReviewQueueSerializer
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = Job.objects.select_related(
+            'hr', 'hr__user', 'hr__trust', 'category', 'category__parent', 'work_mode'
+        ).prefetch_related(
+            'job_locations', 'job_locations__location', 'job_skills', 'job_skills__skill',
+            'reviews', 'reviews__reviewer'
+        ).order_by('-created_at', '-id')
+
+        # Status filter
+        status_param = self.request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+        else:
+            if 'status' not in self.request.query_params:
+                queryset = queryset.filter(status='PENDING_REVIEW')
+
+        # Search filter
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) |
+                Q(hr__company_name__icontains=search) |
+                Q(description__icontains=search) |
+                Q(job_skills__skill__name__icontains=search)
+            ).distinct()
+
+        # Category filter
+        category_id = self.request.query_params.get('category_id', '').strip()
+        if category_id:
+            queryset = queryset.filter(category_id=category_id)
+
+        # Employer filter
+        employer_id = self.request.query_params.get('employer_id', '').strip()
+        if employer_id:
+            queryset = queryset.filter(hr_id=employer_id)
+
+        return queryset
 
 
 class JobReviewDecisionView(APIView):
     """
-    Super Admin endpoint to review (approve/reject) a posted job.
+    Endpoint for Admin / Super Admin to approve or reject a posted job.
+    Uses database atomic transactions and locking to prevent race conditions or duplicate reviews.
     """
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def post(self, request, job_id):
         action = request.data.get('action', '').upper().strip()
         notes = request.data.get('notes', '') or request.data.get('reason', '')
+        reason = request.data.get('reason', '') or notes
 
         if action not in ['APPROVED', 'REJECTED']:
             return Response(
@@ -848,34 +1078,146 @@ class JobReviewDecisionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            job = Job.objects.get(pk=job_id)
-        except Job.DoesNotExist:
-            return Response({"detail": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+        if action == 'REJECTED' and not reason:
+            return Response(
+                {"detail": "A rejection reason is required when rejecting a job submission."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        job.status = 'PUBLISHED' if action == 'APPROVED' else 'REJECTED'
-        job.save()
+        with transaction.atomic():
+            try:
+                job = Job.objects.select_for_update().select_related('hr', 'hr__user').get(pk=job_id)
+            except Job.DoesNotExist:
+                return Response({"detail": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        JobReview.objects.create(
-            job=job,
-            reviewer=request.user,
-            action=action,
-            notes=notes
-        )
+            # Prevent employer from reviewing their own job
+            if request.user.id == job.hr.user.id:
+                return Response(
+                    {"detail": "Employers are not authorized to review their own job postings."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
 
-        log_audit_event(
-            actor=request.user,
-            action='JOB_REVIEW',
-            target_type='Job',
-            target_id=job.id,
-            target_repr=f"Job #{job.id} - {job.title}",
-            outcome=action,
-            description=f"Job #{job.id} ({job.title}) {action.lower()} by Super Admin",
-            request=request
-        )
+            # Prevent duplicate decisions if job is already decided
+            if job.status not in ['PENDING_REVIEW', 'DRAFT', 'REJECTED']:
+                if action == 'APPROVED' and job.status == 'PUBLISHED':
+                    return Response({"detail": "Job has already been approved and published."}, status=status.HTTP_400_BAD_REQUEST)
+
+            new_status = Job.Status.PUBLISHED if action == 'APPROVED' else Job.Status.REJECTED
+            job.status = new_status
+            if action == 'APPROVED':
+                job.published_at = timezone.now()
+            job.save()
+
+            # Record JobReview history row
+            review = JobReview.objects.create(
+                job=job,
+                reviewer=request.user,
+                action=action,
+                reason=reason if action == 'REJECTED' else '',
+                notes=notes
+            )
+
+            # Update EmployerTrust metrics
+            trust, _ = EmployerTrust.objects.get_or_create(employer=job.hr)
+            if action == 'APPROVED':
+                trust.jobs_approved += 1
+            else:
+                trust.jobs_rejected += 1
+            trust.save()
+
+            # Send Notification to Employer
+            Notification.objects.create(
+                user=job.hr.user,
+                notification_type='JOB_REVIEW_DECISION',
+                title=f"Job Submission {action.capitalize()}",
+                message=f"Your job posting '{job.title}' was {action.lower()} by moderation." + (f" Reason: {reason}" if reason else ""),
+                reference_type='Job',
+                reference_id=job.id
+            )
+
+            log_audit_event(
+                actor=request.user,
+                action='JOB_REVIEW',
+                target_type='Job',
+                target_id=job.id,
+                target_repr=f"Job #{job.id} - {job.title}",
+                outcome=action,
+                description=f"Job #{job.id} ({job.title}) set to {new_status} by {request.user.email}",
+                request=request
+            )
 
         return Response({
             "message": f"Job review updated to {action}.",
+            "job_status": job.status,
+            "published_at": job.published_at,
+            "review": JobReviewHistorySerializer(review).data
+        }, status=status.HTTP_200_OK)
+
+
+class EmployerJobSubmitView(APIView):
+    """
+    Endpoint for HR/Employer to submit a draft job for review or resubmit a rejected job.
+    Validates required fields and unapproved/suspended employer status.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsHRRole)
+
+    def post(self, request, job_id):
+        try:
+            hr_profile = HRProfile.objects.select_related('user').get(user=request.user)
+        except HRProfile.DoesNotExist:
+            return Response({"detail": "HR profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Unapproved or suspended employers CANNOT submit jobs
+        if hr_profile.verification_status != 'APPROVED' or request.user.status != User.Status.ACTIVE:
+            return Response(
+                {"detail": "Your employer profile must be verified and approved by an admin before submitting jobs for review."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            job = Job.objects.get(pk=job_id, hr=hr_profile)
+        except Job.DoesNotExist:
+            return Response({"detail": "Job not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate required job fields
+        missing_fields = []
+        if not job.title: missing_fields.append("title")
+        if not job.description: missing_fields.append("description")
+        if not job.category: missing_fields.append("category")
+        if not job.work_mode: missing_fields.append("work_mode")
+
+        if missing_fields:
+            return Response(
+                {"detail": f"Cannot submit job. Required fields missing: {', '.join(missing_fields)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            job.status = Job.Status.PENDING_REVIEW
+            job.save()
+
+            # Notify Super Admins / Moderators
+            notify_super_admins_and_moderators(
+                notification_type='JOB_SUBMISSION',
+                title='New Job Submitted for Review',
+                message=f"Employer '{job.hr.company_name or job.hr.user.email}' submitted job '{job.title}' (ID: #{job.id}) for review.",
+                reference_type='Job',
+                reference_id=job.id
+            )
+
+            log_audit_event(
+                actor=request.user,
+                action='JOB_SUBMIT',
+                target_type='Job',
+                target_id=job.id,
+                target_repr=f"Job #{job.id} - {job.title}",
+                outcome='SUCCESS',
+                description=f"Employer submitted job #{job.id} for review",
+                request=request
+            )
+
+        return Response({
+            "message": f"Job #{job.id} submitted for review successfully.",
             "job_status": job.status
         }, status=status.HTTP_200_OK)
 
@@ -1178,3 +1520,334 @@ class SkillPublicListView(generics.ListAPIView):
         if category_id:
             queryset = queryset.filter(category_id=category_id)
         return queryset
+
+
+def notify_super_admins_and_moderators(notification_type, title, message, reference_type, reference_id):
+    """
+    Helper to dispatch notification to all active Super Admin and Admin users.
+    """
+    moderators = User.objects.filter(
+        role__in=[User.Role.SUPER_ADMIN, User.Role.ADMIN],
+        status=User.Status.ACTIVE
+    ).distinct()
+    notifications = [
+        Notification(
+            user=mod,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            reference_type=reference_type,
+            reference_id=reference_id
+        )
+        for mod in moderators
+    ]
+    if notifications:
+        Notification.objects.bulk_create(notifications)
+
+
+class NotificationListView(generics.ListAPIView):
+    """
+    List notifications for the authenticated user only.
+    Supports filtering by unread, category, and search query.
+    """
+    serializer_class = NotificationSerializer
+    permission_classes = (permissions.IsAuthenticated,)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        # Strict user scoping: user can NEVER retrieve another user's notifications
+        queryset = Notification.objects.filter(user=self.request.user).order_by('-created_at', '-id')
+
+        # Filter by unread
+        unread_param = self.request.query_params.get('unread_only', '').strip().lower()
+        if unread_param == 'true':
+            queryset = queryset.filter(is_read=False)
+
+        # Filter by category / notification_type
+        category_param = self.request.query_params.get('category', '').strip()
+        if category_param and category_param.lower() != 'all':
+            queryset = queryset.filter(notification_type__icontains=category_param)
+
+        # Search filter
+        search_param = self.request.query_params.get('search', '').strip()
+        if search_param:
+            queryset = queryset.filter(
+                Q(title__icontains=search_param) | Q(message__icontains=search_param)
+            )
+
+        return queryset
+
+
+class NotificationMarkReadView(APIView):
+    """
+    Mark a single notification as read for the authenticated user.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request, pk):
+        try:
+            notification = Notification.objects.get(pk=pk, user=request.user)
+        except Notification.DoesNotExist:
+            return Response({"detail": "Notification not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        notification.is_read = True
+        notification.save()
+
+        return Response({
+            "message": "Notification marked as read.",
+            "notification": NotificationSerializer(notification).data
+        }, status=status.HTTP_200_OK)
+
+
+class NotificationMarkAllReadView(APIView):
+    """
+    Mark all unread notifications as read for the authenticated user.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        updated_count = Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+        return Response({
+            "message": f"Marked {updated_count} notifications as read.",
+            "count": updated_count
+        }, status=status.HTTP_200_OK)
+
+
+class NotificationUnreadCountView(APIView):
+    """
+    Get current unread notification count for the authenticated user.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        count = Notification.objects.filter(user=request.user, is_read=False).count()
+        return Response({"unread_count": count}, status=status.HTTP_200_OK)
+
+
+class JobReportCreateView(APIView):
+    """
+    Authenticated candidate or user endpoint to report a job.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        job_id = request.data.get('job_id') or request.data.get('job')
+        reason = request.data.get('reason', '').strip()
+        description = request.data.get('description', '').strip()
+
+        if not job_id:
+            return Response({"detail": "job_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not reason:
+            return Response({"detail": "A report reason is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            job = Job.objects.select_related('hr', 'hr__user').get(pk=job_id)
+        except Job.DoesNotExist:
+            return Response({"detail": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Prevent employer from reporting their own job
+        if job.hr and job.hr.user and job.hr.user.id == request.user.id:
+            return Response({"detail": "You cannot report your own job posting."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Duplicate check: check if user already has a PENDING report for this job
+        existing_report = JobReport.objects.filter(
+            job=job,
+            reported_by=request.user,
+            status=JobReport.Status.PENDING
+        ).first()
+
+        if existing_report:
+            return Response({
+                "detail": "You have already submitted a report for this job that is currently pending review.",
+                "report_id": existing_report.id
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            report = JobReport.objects.create(
+                job=job,
+                reported_by=request.user,
+                reason=reason,
+                description=description,
+                status=JobReport.Status.PENDING
+            )
+
+            # Notify Super Admins / Moderators
+            notify_super_admins_and_moderators(
+                notification_type='JOB_REPORT_SUBMISSION',
+                title=f"New Job Report: {job.title}",
+                message=f"Job #{job.id} '{job.title}' reported by {request.user.email} for reason: {reason}.",
+                reference_type='JobReport',
+                reference_id=report.id
+            )
+
+            log_audit_event(
+                actor=request.user,
+                action='JOB_REPORT_CREATE',
+                target_type='JobReport',
+                target_id=report.id,
+                target_repr=f"Report #{report.id} on Job #{job.id}",
+                outcome='SUCCESS',
+                description=f"User {request.user.email} reported job #{job.id} for {reason}",
+                request=request
+            )
+
+        return Response({
+            "message": "Job report submitted successfully and queued for Super Admin review.",
+            "report": JobReportSerializer(report).data
+        }, status=status.HTTP_201_CREATED)
+
+
+class JobReportAdminListView(generics.ListAPIView):
+    """
+    Super Admin & Admin endpoint to list job reports with filtering, searching, and summary card metrics.
+    """
+    serializer_class = JobReportSerializer
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = JobReport.objects.select_related(
+            'job', 'job__hr', 'job__hr__user', 'reported_by', 'reviewed_by'
+        ).prefetch_related('job__job_locations', 'job__job_locations__location').order_by('-created_at', '-id')
+
+        # Status filter
+        status_param = self.request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+
+        # Search filter
+        search_param = self.request.query_params.get('search', '').strip()
+        if search_param:
+            queryset = queryset.filter(
+                Q(job__title__icontains=search_param) |
+                Q(job__hr__company_name__icontains=search_param) |
+                Q(reported_by__email__icontains=search_param) |
+                Q(reported_by__first_name__icontains=search_param) |
+                Q(reported_by__last_name__icontains=search_param) |
+                Q(reason__icontains=search_param) |
+                Q(description__icontains=search_param)
+            )
+
+        # Location filter
+        location_param = self.request.query_params.get('location', '').strip()
+        if location_param:
+            queryset = queryset.filter(
+                Q(job__job_locations__location__city__icontains=location_param) |
+                Q(job__job_locations__location__district__icontains=location_param) |
+                Q(job__job_locations__location__state__icontains=location_param)
+            ).distinct()
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page if page is not None else queryset, many=True)
+
+        summary = {
+            "open_count": JobReport.objects.filter(status='PENDING').count(),
+            "reviewed_count": JobReport.objects.filter(status='REVIEWED').count(),
+            "dismissed_count": JobReport.objects.filter(status='REJECTED').count(),
+            "total_count": JobReport.objects.count()
+        }
+
+        if page is not None:
+            response = self.get_paginated_response(serializer.data)
+            response.data['summary'] = summary
+            return response
+
+        return Response({
+            "results": serializer.data,
+            "summary": summary
+        })
+
+
+class JobReportDecisionView(APIView):
+    """
+    Super Admin / Admin endpoint to take action on a job report.
+    Actions supported:
+    - REVIEWED (Action taken / marked reviewed)
+    - REJECTED (Dismiss report - requires explanation)
+    - Combined action to moderate linked job (CLOSE, REJECT, SUSPEND)
+    """
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+
+    def post(self, request, report_id):
+        action = request.data.get('action', '').upper().strip()
+        notes = request.data.get('notes', '').strip() or request.data.get('reason', '').strip()
+        job_action = request.data.get('job_action', '').upper().strip()
+        job_reason = request.data.get('job_reason', '').strip() or notes
+
+        if action not in ['REVIEWED', 'REJECTED', 'DISMISS', 'MARK_REVIEWED']:
+            return Response(
+                {"detail": "Invalid report action. Allowed: REVIEWED, REJECTED, DISMISS, MARK_REVIEWED."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Normalize DISMISS -> REJECTED and MARK_REVIEWED -> REVIEWED
+        if action == 'DISMISS':
+            action = 'REJECTED'
+        elif action == 'MARK_REVIEWED':
+            action = 'REVIEWED'
+
+        if action == 'REJECTED' and not notes:
+            return Response(
+                {"detail": "An explanation notes field is required when dismissing a report."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            try:
+                report = JobReport.objects.select_for_update().select_related('job', 'job__hr', 'job__hr__user').get(pk=report_id)
+            except JobReport.DoesNotExist:
+                return Response({"detail": "Job report not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            # Record report decision
+            report.status = action
+            report.reviewed_by = request.user
+            report.reviewed_at = timezone.now()
+            report.notes = notes
+            report.save()
+
+            # Optional linked job moderation
+            if job_action:
+                job = Job.objects.select_for_update().get(pk=report.job.id)
+                if job_action in ['CLOSED', 'REJECTED', 'SUSPENDED', 'PUBLISHED', 'ARCHIVED']:
+                    job.status = job_action
+                    job.save()
+
+                    # Record JobReview
+                    JobReview.objects.create(
+                        job=job,
+                        reviewer=request.user,
+                        action=job_action,
+                        reason=job_reason,
+                        notes=f"Job moderation triggered via JobReport #{report.id}: {notes}"
+                    )
+
+                    # Notify Employer
+                    if job.hr and job.hr.user:
+                        Notification.objects.create(
+                            user=job.hr.user,
+                            notification_type='JOB_REVIEW_DECISION',
+                            title=f"Job Posting Status Updated: {job_action}",
+                            message=f"Your job posting '{job.title}' status was updated to {job_action} by moderation." + (f" Reason: {job_reason}" if job_reason else ""),
+                            reference_type='Job',
+                            reference_id=job.id
+                        )
+
+            log_audit_event(
+                actor=request.user,
+                action='JOB_REPORT_DECISION',
+                target_type='JobReport',
+                target_id=report.id,
+                target_repr=f"Report #{report.id} on Job #{report.job.id}",
+                outcome=action,
+                description=f"Report #{report.id} set to {action} by {request.user.email}." + (f" Linked job action: {job_action}" if job_action else ""),
+                request=request
+            )
+
+        return Response({
+            "message": f"Job report updated to {action}.",
+            "report": JobReportSerializer(report).data
+        }, status=status.HTTP_200_OK)

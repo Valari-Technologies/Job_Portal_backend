@@ -683,8 +683,9 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
                     profile.company_address = company_address
                 if company_description:
                     profile.company_description = company_description
-                if company_logo:
-                    profile.company_logo = company_logo
+                logo_val = company_logo or profile_photo
+                if logo_val:
+                    profile.company_logo = logo_val
                 if location_id:
                     profile.location_id = location_id
                 if designation:
@@ -1305,6 +1306,7 @@ class EmployerUserSerializer(serializers.ModelSerializer):
     company_address = serializers.CharField(source='hr_profile.company_address', read_only=True)
     company_description = serializers.CharField(source='hr_profile.company_description', read_only=True)
     company_logo = serializers.CharField(source='hr_profile.company_logo', read_only=True)
+    profile_photo = serializers.SerializerMethodField()
     designation = serializers.CharField(source='hr_profile.designation', read_only=True)
     verification_status = serializers.CharField(source='hr_profile.verification_status', read_only=True)
     trust_level = serializers.CharField(source='hr_profile.trust_level', read_only=True)
@@ -1328,6 +1330,7 @@ class EmployerUserSerializer(serializers.ModelSerializer):
             'company_address',
             'company_description',
             'company_logo',
+            'profile_photo',
             'designation',
             'verification_status',
             'trust_level',
@@ -1335,6 +1338,14 @@ class EmployerUserSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         )
+
+    def get_profile_photo(self, obj):
+        hr = getattr(obj, 'hr_profile', None)
+        if hr and hr.company_logo:
+            return hr.company_logo
+        if obj.profile_picture:
+            return obj.profile_picture.url
+        return None
 
     def get_full_name(self, obj):
         name = f"{obj.first_name} {obj.last_name}".strip()

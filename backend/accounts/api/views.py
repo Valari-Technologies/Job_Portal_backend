@@ -16,7 +16,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .permissions import IsSuperAdminRole
+from .permissions import IsSuperAdminRole, IsAdminRole
 from .serializers import (
     CandidateRegisterSerializer,
     HRRegisterSerializer,
@@ -64,11 +64,11 @@ class CandidateRegisterView(generics.CreateAPIView):
 
 class HRRegisterView(generics.CreateAPIView):
     """
-    API endpoint for registering HR users (Super Admin restricted).
+    API endpoint for registering HR users.
     """
     queryset = User.objects.all()
     serializer_class = HRRegisterSerializer
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
@@ -88,19 +88,27 @@ class HRRegisterView(generics.CreateAPIView):
 
 class AdminCreateUserView(generics.CreateAPIView):
     """
-    API endpoint for Super Admin to create ADMIN or HR accounts.
+    API endpoint for Super Admin and Admin to create ADMIN or HR accounts.
     """
     queryset = User.objects.all()
     serializer_class = AdminCreateUserSerializer
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
+        
+        target_role = serializer.validated_data.get('role')
+        if request.user.role == User.Role.ADMIN and target_role == User.Role.ADMIN:
+            return Response(
+                {"detail": "Admins cannot create another Admin account. Only Super Admins can create Admins."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         self.perform_create(serializer)
         return Response(
             {
-                "message": f"{serializer.validated_data.get('role')} account created successfully.",
+                "message": f"{target_role} account created successfully.",
                 "user": serializer.data
             },
             status=status.HTTP_201_CREATED
@@ -393,10 +401,10 @@ class PasswordResetConfirmView(APIView):
 
 class CandidateListView(generics.ListAPIView):
     """
-    API endpoint for Super Admin to list created Candidate accounts.
+    API endpoint for Super Admin and Admin to list Candidate accounts.
     """
     serializer_class = CandidateUserSerializer
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def get_queryset(self):
         queryset = User.objects.filter(
@@ -442,17 +450,27 @@ class CandidateListView(generics.ListAPIView):
 
 class EmployerListView(generics.ListAPIView):
     """
-    API endpoint for Super Admin to list created Employer accounts.
+    API endpoint for Super Admin and Admin to list Employer/Recruiter accounts.
     """
     serializer_class = EmployerUserSerializer
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def get_queryset(self):
         queryset = User.objects.filter(
             role=User.Role.HR
         ).exclude(
             status=User.Status.DELETED
-        ).select_related('hr_profile', 'hr_profile__location').order_by('-created_at', '-id')
+        ).select_related('hr_profile', 'hr_profile__location', 'created_by').order_by('-created_at', '-id')
+
+        # Role-based visibility filtering:
+        # Each Admin user ONLY sees Recruiter accounts created by themselves (per-Admin isolation)
+        # Super Admin viewing with only_admin_created=true sees all Admin-created Recruiters
+        # Super Admin viewing Super Admin employers view (no only_admin_created) sees ALL Recruiters across all accounts
+        only_admin_created = self.request.query_params.get('only_admin_created', '').lower() == 'true'
+        if self.request.user.role == User.Role.ADMIN:
+            queryset = queryset.filter(created_by=self.request.user)
+        elif only_admin_created:
+            queryset = queryset.filter(created_by__role=User.Role.ADMIN)
 
         search = self.request.query_params.get('search', '').strip()
         if search:
@@ -484,6 +502,78 @@ class EmployerListView(generics.ListAPIView):
             )
 
         return queryset
+
+
+class AdminUpdateEmployerDetailView(APIView):
+    """
+    API endpoint for Admin and Super Admin to retrieve and update a Recruiter/Employer account.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+
+    def get(self, request, user_id):
+        try:
+            target_user = User.objects.get(pk=user_id, role=User.Role.HR)
+        except User.DoesNotExist:
+            return Response({"detail": "Employer account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = EmployerUserSerializer(target_user)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request, user_id):
+        try:
+            target_user = User.objects.get(pk=user_id, role=User.Role.HR)
+        except User.DoesNotExist:
+            return Response({"detail": "Employer account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data
+        full_name = data.get('full_name') or data.get('fullName') or data.get('name')
+        if full_name:
+            names = full_name.strip().split(' ', 1)
+            target_user.first_name = names[0]
+            target_user.last_name = names[1] if len(names) > 1 else ''
+
+        if 'email' in data and data['email']:
+            target_user.email = data['email'].lower().strip()
+        if 'phone_number' in data or 'phone' in data:
+            target_user.phone_number = data.get('phone_number') or data.get('phone')
+        if 'status' in data and data['status']:
+            status_val = data['status'].upper().strip()
+            if status_val in dict(User.Status.choices):
+                target_user.status = status_val
+                target_user.is_active = (status_val == User.Status.ACTIVE)
+
+        target_user.save()
+
+        profile, _ = HRProfile.objects.get_or_create(user=target_user)
+        if 'company_name' in data:
+            profile.company_name = data['company_name']
+        if 'company_email' in data:
+            profile.company_email = data['company_email']
+        if 'company_phone' in data:
+            profile.company_phone = data['company_phone']
+        if 'company_website' in data:
+            profile.company_website = data['company_website']
+        if 'company_address' in data:
+            profile.company_address = data['company_address']
+        if 'company_description' in data:
+            profile.company_description = data['company_description']
+        if 'designation' in data:
+            profile.designation = data['designation']
+        
+        logo = data.get('company_logo') or data.get('profile_photo')
+        if logo:
+            profile.company_logo = logo
+
+        profile.save()
+
+        serializer = EmployerUserSerializer(target_user)
+        return Response({
+            "message": "Employer account updated successfully.",
+            "employer": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    def put(self, request, user_id):
+        return self.patch(request, user_id)
 
 
 class LocationListView(generics.ListCreateAPIView):

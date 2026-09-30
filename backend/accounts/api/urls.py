@@ -14,6 +14,7 @@ from .views import (
     PasswordResetConfirmView,
     LocationListView,
     EmployerListView,
+    AdminUpdateEmployerDetailView,
     CandidateListView,
     AuditEventListView,
     SecurityPostureView,
@@ -101,6 +102,11 @@ urlpatterns = [
         'employers/',
         EmployerListView.as_view(),
         name='employer_list'
+    ),
+    path(
+        'admin/employers/<int:user_id>/',
+        AdminUpdateEmployerDetailView.as_view(),
+        name='admin_employer_detail_update'
     ),
     path(
         'locations/',

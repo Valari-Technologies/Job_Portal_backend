@@ -1001,9 +1001,11 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'id': self.user.id,
             'username': self.user.username,
             'email': self.user.email,
+            'first_name': self.user.first_name,
+            'last_name': self.user.last_name,
             'role': self.user.role,
             'phone_number': self.user.phone_number,
-            'fullName': f"{self.user.first_name} {self.user.last_name}".strip(),
+            'fullName': f"{self.user.first_name} {self.user.last_name}".strip() or self.user.username,
             'status': self.user.status,
         }
 

@@ -11,7 +11,8 @@ from ..models import (
     Role, UserRole, AdminProfile, CandidateProfile, HRProfile, Education, Experience,
     Resume, Skill, CandidateSkill, EmployerVerification, EmployerTrust, Location,
     AuditEvent, JobCategory, Job, JobReview, JobLocation, JobSkill, WorkMode, EmploymentType,
-    Notification, JobReport
+    Notification, JobReport, Application, ApplicationStatusHistory, ApplicationMessage,
+    Interview, SavedJob, JobRecommendation, CandidateActivity
 )
 from ..services.audit_service import log_audit_event
 
@@ -1795,3 +1796,300 @@ class JobReportSerializer(serializers.ModelSerializer):
             'email': u.email,
             'name': name,
         }
+
+
+# ==========================================
+# CANDIDATE PORTAL SERIALIZERS
+# ==========================================
+
+class CandidateJobSerializer(serializers.ModelSerializer):
+    company_name = serializers.SerializerMethodField()
+    company_logo = serializers.SerializerMethodField()
+    company_initials = serializers.SerializerMethodField()
+    category_name = serializers.SerializerMethodField()
+    work_mode_name = serializers.SerializerMethodField()
+    location_name = serializers.SerializerMethodField()
+    locations = serializers.SerializerMethodField()
+    skills = serializers.SerializerMethodField()
+    is_saved = serializers.SerializerMethodField()
+    is_applied = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Job
+        fields = (
+            'id',
+            'title',
+            'status',
+            'company_name',
+            'company_logo',
+            'company_initials',
+            'category',
+            'category_name',
+            'work_mode',
+            'work_mode_name',
+            'location_name',
+            'locations',
+            'skills',
+            'salary_min',
+            'salary_max',
+            'salary_period',
+            'experience_min',
+            'experience_max',
+            'education_requirement',
+            'application_type',
+            'application_deadline',
+            'description',
+            'responsibilities',
+            'is_saved',
+            'is_applied',
+            'published_at',
+            'created_at',
+        )
+
+    def get_company_name(self, obj):
+        return obj.hr.company_name if (obj.hr and obj.hr.company_name) else 'Employer'
+
+    def get_company_logo(self, obj):
+        if obj.hr and obj.hr.company_logo:
+            try:
+                return obj.hr.company_logo.url
+            except Exception:
+                return None
+        return None
+
+    def get_company_initials(self, obj):
+        c_name = self.get_company_name(obj)
+        return c_name[0].upper() if c_name else 'E'
+
+    def get_category_name(self, obj):
+        return obj.category.name if obj.category else None
+
+    def get_work_mode_name(self, obj):
+        return obj.work_mode.name if obj.work_mode else None
+
+    def get_location_name(self, obj):
+        locs = obj.job_locations.select_related('location').all()
+        if locs.exists():
+            return locs[0].location.get_full_path()
+        return 'Location Not Specified'
+
+    def get_locations(self, obj):
+        res = []
+        for jl in obj.job_locations.select_related('location').all():
+            res.append({
+                'id': jl.location.id,
+                'name': jl.location.name,
+                'full_path': jl.location.get_full_path(),
+                'state': jl.location.get_state(),
+                'district': jl.location.get_district(),
+            })
+        return res
+
+    def get_skills(self, obj):
+        res = []
+        for js in obj.job_skills.select_related('skill').all():
+            res.append({
+                'id': js.skill.id,
+                'name': js.skill.name,
+                'is_required': js.is_required,
+            })
+        return res
+
+    def get_is_saved(self, obj):
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated and hasattr(request.user, 'candidate_profile'):
+            return SavedJob.objects.filter(candidate=request.user.candidate_profile, job=obj).exists()
+        return False
+
+    def get_is_applied(self, obj):
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated and hasattr(request.user, 'candidate_profile'):
+            return Application.objects.filter(candidate=request.user.candidate_profile, job=obj).exists()
+        return False
+
+
+class ApplicationStatusHistorySerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApplicationStatusHistory
+        fields = (
+            'id',
+            'status',
+            'changed_by',
+            'changed_by_name',
+            'notes',
+            'created_at',
+        )
+
+    def get_changed_by_name(self, obj):
+        if not obj.changed_by:
+            return 'System'
+        u = obj.changed_by
+        return f"{u.first_name} {u.last_name}".strip() or u.username
+
+
+class ApplicationMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+    sender_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApplicationMessage
+        fields = (
+            'id',
+            'application',
+            'sender',
+            'sender_name',
+            'sender_role',
+            'message',
+            'is_read',
+            'created_at',
+        )
+
+    def get_sender_name(self, obj):
+        u = obj.sender
+        return f"{u.first_name} {u.last_name}".strip() or u.username
+
+    def get_sender_role(self, obj):
+        return obj.sender.role if obj.sender else 'UNKNOWN'
+
+
+class CandidateInterviewSerializer(serializers.ModelSerializer):
+    job_title = serializers.SerializerMethodField()
+    company_name = serializers.SerializerMethodField()
+    scheduled_at_formatted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Interview
+        fields = (
+            'id',
+            'application',
+            'job',
+            'job_title',
+            'company_name',
+            'interview_type',
+            'scheduled_date',
+            'scheduled_time',
+            'scheduled_at_formatted',
+            'location',
+            'meeting_link',
+            'phone_number',
+            'notes',
+            'status',
+            'result',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_job_title(self, obj):
+        return obj.job.title if obj.job else (obj.application.job.title if obj.application and obj.application.job else 'Position')
+
+    def get_company_name(self, obj):
+        job_obj = obj.job or (obj.application.job if obj.application else None)
+        if job_obj and job_obj.hr:
+            return job_obj.hr.company_name or 'Employer'
+        return 'Employer'
+
+    def get_scheduled_at_formatted(self, obj):
+        if obj.scheduled_date and obj.scheduled_time:
+            return f"{obj.scheduled_date} at {obj.scheduled_time.strftime('%I:%M %p')}"
+        elif obj.scheduled_date:
+            return str(obj.scheduled_date)
+        return 'TBD'
+
+
+class CandidateApplicationDetailSerializer(serializers.ModelSerializer):
+    job = CandidateJobSerializer(read_only=True)
+    resume = ResumeSerializer(read_only=True)
+    status_history = ApplicationStatusHistorySerializer(many=True, read_only=True)
+    messages = ApplicationMessageSerializer(many=True, read_only=True)
+    interview = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Application
+        fields = (
+            'id',
+            'job',
+            'candidate',
+            'status',
+            'application_type',
+            'applied_at',
+            'reviewed_at',
+            'remarks',
+            'resume',
+            'status_history',
+            'messages',
+            'interview',
+            'created_at',
+            'updated_at',
+        )
+
+    def get_interview(self, obj):
+        active_interview = obj.interviews.order_by('-created_at').first()
+        if active_interview:
+            return CandidateInterviewSerializer(active_interview).data
+        return None
+
+
+class CandidateApplicationSubmitSerializer(serializers.Serializer):
+    job_id = serializers.IntegerField(required=True)
+    resume_id = serializers.IntegerField(required=False, allow_null=True)
+    application_type = serializers.CharField(required=False, default='PROFILE_RESUME')
+    phone_number = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    candidate_note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        job_id = attrs.get('job_id')
+        try:
+            job = Job.objects.get(id=job_id)
+        except Job.DoesNotExist:
+            raise serializers.ValidationError({"job_id": "Job does not exist."})
+
+        if job.status != Job.Status.PUBLISHED:
+            raise serializers.ValidationError({"job_id": "This job is not active or accepting applications."})
+
+        request = self.context.get('request')
+        candidate_profile = request.user.candidate_profile
+
+        if Application.objects.filter(candidate=candidate_profile, job=job).exists():
+            raise serializers.ValidationError({"non_field_errors": ["You have already applied for this position."]})
+
+        app_type = attrs.get('application_type') or job.application_type or 'PROFILE_RESUME'
+        resume_id = attrs.get('resume_id')
+
+        if app_type == 'PROFILE_RESUME':
+            if not resume_id:
+                # Fall back to candidate's default resume if available
+                default_resume = candidate_profile.resumes.filter(is_default=True).first()
+                if default_resume:
+                    attrs['resume_obj'] = default_resume
+                else:
+                    first_resume = candidate_profile.resumes.first()
+                    if first_resume:
+                        attrs['resume_obj'] = first_resume
+                    else:
+                        raise serializers.ValidationError({"resume_id": "A resume is required for professional applications. Please upload a resume first."})
+            else:
+                try:
+                    resume_obj = Resume.objects.get(id=resume_id, candidate=candidate_profile)
+                    attrs['resume_obj'] = resume_obj
+                except Resume.DoesNotExist:
+                    raise serializers.ValidationError({"resume_id": "Selected resume does not exist or belong to your profile."})
+        else:
+            attrs['resume_obj'] = None
+
+        attrs['job_obj'] = job
+        return attrs
+
+
+class SavedJobSerializer(serializers.ModelSerializer):
+    job = CandidateJobSerializer(read_only=True)
+
+    class Meta:
+        model = SavedJob
+        fields = (
+            'id',
+            'candidate',
+            'job',
+            'created_at',
+        )

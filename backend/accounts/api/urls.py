@@ -41,6 +41,23 @@ from .views import (
     JobReportCreateView,
     JobReportAdminListView,
     JobReportDecisionView,
+    CandidateProfileDetailView,
+    CandidateProfilePhotoUploadView,
+    CandidateResumeListView,
+    CandidateResumeSetDefaultView,
+    CandidateResumeDeleteView,
+    CandidateJobListView,
+    CandidateJobDetailView,
+    CandidateToggleSavedJobView,
+    CandidateSavedJobListView,
+    CandidateApplicationListView,
+    CandidateApplicationSummaryView,
+    CandidateApplicationDetailView,
+    CandidateApplicationWithdrawView,
+    CandidateInterviewListView,
+    CandidateInterviewSummaryView,
+    CandidateInterviewRescheduleView,
+    CandidateDashboardView,
 )
 
 urlpatterns = [
@@ -263,4 +280,24 @@ urlpatterns = [
         JobReportDecisionView.as_view(),
         name='admin_report_decision'
     ),
+
+    # Candidate Portal API Endpoints
+    path('candidate/profile/', CandidateProfileDetailView.as_view(), name='candidate_profile_detail'),
+    path('candidate/profile/photo/', CandidateProfilePhotoUploadView.as_view(), name='candidate_profile_photo'),
+    path('candidate/resumes/', CandidateResumeListView.as_view(), name='candidate_resume_list'),
+    path('candidate/resumes/<int:pk>/set-default/', CandidateResumeSetDefaultView.as_view(), name='candidate_resume_set_default'),
+    path('candidate/resumes/<int:pk>/', CandidateResumeDeleteView.as_view(), name='candidate_resume_delete'),
+    path('candidate/jobs/', CandidateJobListView.as_view(), name='candidate_job_list'),
+    path('candidate/jobs/<int:pk>/', CandidateJobDetailView.as_view(), name='candidate_job_detail'),
+    path('candidate/jobs/<int:pk>/save/', CandidateToggleSavedJobView.as_view(), name='candidate_job_save_toggle'),
+    path('candidate/saved-jobs/', CandidateSavedJobListView.as_view(), name='candidate_saved_job_list'),
+    path('candidate/applications/', CandidateApplicationListView.as_view(), name='candidate_application_list'),
+    path('candidate/applications/submit/', CandidateApplicationListView.as_view(), name='candidate_application_submit'),
+    path('candidate/applications/summary/', CandidateApplicationSummaryView.as_view(), name='candidate_application_summary'),
+    path('candidate/applications/<int:pk>/', CandidateApplicationDetailView.as_view(), name='candidate_application_detail'),
+    path('candidate/applications/<int:pk>/withdraw/', CandidateApplicationWithdrawView.as_view(), name='candidate_application_withdraw'),
+    path('candidate/interviews/', CandidateInterviewListView.as_view(), name='candidate_interview_list'),
+    path('candidate/interviews/summary/', CandidateInterviewSummaryView.as_view(), name='candidate_interview_summary'),
+    path('candidate/interviews/<int:pk>/reschedule/', CandidateInterviewRescheduleView.as_view(), name='candidate_interview_reschedule'),
+    path('candidate/dashboard/', CandidateDashboardView.as_view(), name='candidate_dashboard'),
 ]

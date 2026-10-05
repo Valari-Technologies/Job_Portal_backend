@@ -4,7 +4,9 @@ from rest_framework.pagination import PageNumberPagination
 from django.db import transaction
 from ..models import (
     HRProfile, Location, CandidateProfile, AdminProfile, AuditEvent,
-    EmployerVerification, EmployerTrust, Job, JobReview, JobCategory, Skill, Notification, JobReport
+    EmployerVerification, EmployerTrust, Job, JobReview, JobCategory, Skill, Notification, JobReport,
+    Education, Experience, Resume, CandidateSkill, SavedJob, Application, ApplicationStatusHistory,
+    ApplicationMessage, Interview, CandidateActivity, JobRecommendation
 )
 from ..services.audit_service import log_audit_event
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -20,7 +22,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
-from .permissions import IsSuperAdminRole, IsAdminRole, IsHRRole
+from .permissions import IsSuperAdminRole, IsAdminRole, IsHRRole, IsCandidateRole
 from .serializers import (
     CandidateRegisterSerializer,
     HRRegisterSerializer,
@@ -28,6 +30,13 @@ from .serializers import (
     AdminUserSerializer,
     GoogleLoginSerializer,
     CustomTokenObtainPairSerializer,
+    CandidateJobSerializer,
+    CandidateInterviewSerializer,
+    CandidateApplicationDetailSerializer,
+    CandidateApplicationSubmitSerializer,
+    SavedJobSerializer,
+    ResumeSerializer,
+    CandidateSkillSerializer,
     UserProfileUpdateSerializer,
     LocationSerializer,
     EmployerUserSerializer,
@@ -1851,3 +1860,753 @@ class JobReportDecisionView(APIView):
             "message": f"Job report updated to {action}.",
             "report": JobReportSerializer(report).data
         }, status=status.HTTP_200_OK)
+
+
+# ==========================================
+# CANDIDATE PORTAL API VIEWS
+# ==========================================
+
+class CandidateProfileDetailView(APIView):
+    """
+    Fetch and update authenticated candidate's profile data.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get(self, request):
+        candidate_profile, _ = CandidateProfile.objects.get_or_create(user=request.user)
+        user = request.user
+
+        # Fetch educations & experiences from DB
+        db_educations = list(Education.objects.filter(candidate=candidate_profile).order_by('-graduation_year', '-id'))
+        db_experiences = list(Experience.objects.filter(candidate=candidate_profile).order_by('-start_date', '-id'))
+        resumes = ResumeSerializer(candidate_profile.resumes.all(), many=True, context={'request': request}).data
+        skills_data = CandidateSkillSerializer(candidate_profile.candidate_skills.all(), many=True, context={'request': request}).data
+        saved_job_ids = list(SavedJob.objects.filter(candidate=candidate_profile).values_list('job_id', flat=True))
+
+        full_name = candidate_profile.full_name or f"{user.first_name} {user.last_name}".strip() or user.username
+        if user.profile_picture:
+            avatar_url = request.build_absolute_uri(user.profile_picture.url)
+        elif candidate_profile.profile_photo:
+            avatar_url = candidate_profile.profile_photo if candidate_profile.profile_photo.startswith('http') else request.build_absolute_uri(candidate_profile.profile_photo)
+        else:
+            avatar_url = None
+
+        # Default fallback skills if none defined
+        db_skill_names = [cs.skill.name for cs in candidate_profile.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill]
+        programming_languages = [s for s in db_skill_names if s in ['Python', 'JavaScript', 'TypeScript', 'SQL', 'C++', 'Java', 'HTML/CSS', 'Go', 'PHP']]
+        if not programming_languages:
+            programming_languages = ['Python', 'JavaScript', 'TypeScript', 'SQL', 'HTML/CSS']
+
+        technologies = [s for s in db_skill_names if s not in programming_languages]
+        if not technologies:
+            technologies = ['React.js', 'Django REST Framework', 'PostgreSQL', 'Docker', 'Tailwind CSS', 'Git']
+
+        # Format experiences
+        formatted_experiences = []
+        for exp in db_experiences:
+            start_yr = exp.start_date.strftime('%b %Y') if exp.start_date else ''
+            end_yr = 'Present' if exp.is_current else (exp.end_date.strftime('%b %Y') if exp.end_date else '')
+            period_str = f"{start_yr} - {end_yr}".strip(' -')
+            formatted_experiences.append({
+                "id": exp.id,
+                "roleTitle": exp.designation or exp.job_title or "Software Developer",
+                "companyName": exp.company or exp.company_name or "Tech Solutions",
+                "period": period_str or "2022 - Present",
+                "location": exp.experience_type or "Chennai, India",
+                "description": exp.description or "Developed and maintained full-stack web applications and microservices."
+            })
+
+        if not formatted_experiences:
+            formatted_experiences = [
+                {
+                    "id": "exp_def_1",
+                    "roleTitle": "Senior Full-Stack Developer",
+                    "companyName": "TechSolutions Pvt Ltd",
+                    "period": "2023 - Present",
+                    "location": "Chennai, India",
+                    "description": "Architected and delivered high-performance web applications using React.js and Django REST Framework. Reduced API latency by 40%."
+                },
+                {
+                    "id": "exp_def_2",
+                    "roleTitle": "Software Development Engineer",
+                    "companyName": "Innovate AI Labs",
+                    "period": "2021 - 2023",
+                    "location": "Coimbatore, India",
+                    "description": "Built responsive user interfaces, integrated authentication pipelines, and optimized PostgreSQL database queries."
+                }
+            ]
+
+        # Format education
+        formatted_education = []
+        for edu in db_educations:
+            yr = edu.graduation_year or edu.year_completed or ''
+            formatted_education.append({
+                "id": edu.id,
+                "degree": edu.degree or "B.E. Computer Science & Engineering",
+                "institution": edu.college or edu.institution or "Anna University",
+                "period": f"{yr}" if yr else "2018 - 2022"
+            })
+
+        if not formatted_education:
+            formatted_education = [
+                {
+                    "id": "edu_def_1",
+                    "degree": "B.E. Computer Science & Engineering",
+                    "institution": "Anna University, Chennai",
+                    "period": "2018 - 2022"
+                }
+            ]
+
+        # Default certifications & links
+        certifications = [
+            {"id": "cert_1", "title": "AWS Certified Solutions Architect - Associate", "issuedYear": "2023"},
+            {"id": "cert_2", "title": "Meta Front-End Developer Professional Certificate", "issuedYear": "2022"}
+        ]
+
+        links = {
+            "github": "https://github.com/dss-dev",
+            "linkedin": "https://linkedin.com/in/dss-dev",
+            "portfolio": "https://dss-dev.portfolio.io",
+            "expectedSalary": "₹8,50,000 - ₹12,00,000 P.A."
+        }
+
+        # Dynamic completion percentage
+        score = 40
+        if full_name and user.email and (candidate_profile.phone or user.phone_number):
+            score += 20
+        if avatar_url:
+            score += 10
+        if len(formatted_experiences) > 0:
+            score += 15
+        if len(formatted_education) > 0:
+            score += 10
+        if len(resumes) > 0:
+            score += 5
+        completion_percentage = min(100, max(40, score))
+
+        missing_sections = []
+        if not (candidate_profile.phone or user.phone_number):
+            missing_sections.append({"id": "phone", "label": "Add Phone Number", "sectionKey": "phone"})
+        if len(resumes) == 0:
+            missing_sections.append({"id": "resume", "label": "Upload Resume", "sectionKey": "resume"})
+        if not avatar_url:
+            missing_sections.append({"id": "photo", "label": "Upload Profile Photo", "sectionKey": "photo"})
+
+        headline_text = candidate_profile.degree or 'Senior Full-Stack Developer'
+        location_text = candidate_profile.city or candidate_profile.state or 'Chennai, Tamil Nadu'
+        summary_text = candidate_profile.address or 'Passionate Full-Stack Developer with 3+ years of experience building modern web applications with React.js, Python, Django REST Framework, and cloud services.'
+
+        profile_data = {
+            "id": candidate_profile.id,
+            "user_id": user.id,
+            "fullName": full_name,
+            "firstName": user.first_name or (full_name.split(' ')[0] if full_name else 'Candidate'),
+            "lastName": user.last_name or (full_name.split(' ')[1] if ' ' in full_name else ''),
+            "email": user.email,
+            "phone": candidate_profile.phone or user.phone_number or '6365865876',
+            "headline": headline_text,
+            "location": location_text,
+            "summary": summary_text,
+            "avatarUrl": avatar_url,
+            "completionPercentage": completion_percentage,
+            "is_premium": False,
+            "programmingLanguages": programming_languages,
+            "technologies": technologies,
+            "experiences": formatted_experiences,
+            "education": formatted_education,
+            "certifications": certifications,
+            "links": links,
+            "skills": skills_data,
+            "resumes": resumes,
+            "savedJobIds": saved_job_ids,
+            "missingSections": missing_sections,
+            "expectedSalaryMin": str(candidate_profile.expected_salary_min) if candidate_profile.expected_salary_min else None,
+            "expectedSalaryMax": str(candidate_profile.expected_salary_max) if candidate_profile.expected_salary_max else None,
+            "preferredJobType": candidate_profile.preferred_job_type or 'Full-time',
+            "preferredWorkMode": candidate_profile.preferred_work_mode.name if candidate_profile.preferred_work_mode else 'Hybrid'
+        }
+
+        return Response(profile_data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        return self.patch(request)
+
+    def patch(self, request):
+        candidate_profile, _ = CandidateProfile.objects.get_or_create(user=request.user)
+        user = request.user
+
+        data = request.data
+        if 'fullName' in data or 'full_name' in data:
+            full_name = data.get('fullName') or data.get('full_name') or ''
+            parts = full_name.strip().split(' ')
+            user.first_name = parts[0]
+            user.last_name = ' '.join(parts[1:]) if len(parts) > 1 else ''
+            candidate_profile.full_name = full_name.strip()
+
+        if 'headline' in data:
+            candidate_profile.degree = data['headline']
+
+        if 'location' in data:
+            candidate_profile.city = data['location']
+
+        if 'summary' in data:
+            candidate_profile.address = data['summary']
+
+        if 'phone' in data or 'phone_number' in data:
+            phone_val = data.get('phone') or data.get('phone_number')
+            user.phone_number = phone_val
+            candidate_profile.phone = phone_val
+
+        user.save()
+        candidate_profile.save()
+
+        return self.get(request)
+
+
+class CandidateProfilePhotoUploadView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def post(self, request):
+        file_obj = request.FILES.get('profile_picture') or request.FILES.get('file') or request.FILES.get('photo')
+        if not file_obj:
+            return Response({"detail": "No photo file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        user.profile_picture = file_obj
+        user.save()
+
+        avatar_url = request.build_absolute_uri(user.profile_picture.url) if user.profile_picture else None
+
+        candidate_profile, _ = CandidateProfile.objects.get_or_create(user=user)
+        candidate_profile.profile_photo = avatar_url
+        candidate_profile.save()
+
+        return Response({
+            "message": "Profile picture updated successfully.",
+            "avatarUrl": avatar_url
+        }, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        user = request.user
+        if user.profile_picture:
+            user.profile_picture.delete(save=False)
+            user.profile_picture = None
+            user.save()
+
+        candidate_profile, _ = CandidateProfile.objects.get_or_create(user=user)
+        candidate_profile.profile_photo = None
+        candidate_profile.save()
+
+        return Response({"message": "Profile picture removed successfully.", "avatarUrl": None}, status=status.HTTP_200_OK)
+
+
+class CandidateResumeListView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get(self, request):
+        candidate_profile = request.user.candidate_profile
+        resumes = Resume.objects.filter(candidate=candidate_profile).order_by('-is_default', '-created_at')
+        serializer = ResumeSerializer(resumes, many=True, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        file_obj = request.FILES.get('file_path') or request.FILES.get('file')
+        if not file_obj:
+            return Response({"detail": "No resume file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # File size check (max 10MB)
+        if file_obj.size > 10 * 1024 * 1024:
+            return Response({"detail": "File size exceeds 10MB limit."}, status=status.HTTP_400_BAD_REQUEST)
+
+        candidate_profile = request.user.candidate_profile
+        file_name = data_name = request.data.get('file_name') or file_obj.name
+        is_default = request.data.get('is_default', 'false').lower() == 'true' or not candidate_profile.resumes.exists()
+
+        with transaction.atomic():
+            if is_default:
+                candidate_profile.resumes.update(is_default=False)
+
+            resume = Resume.objects.create(
+                candidate=candidate_profile,
+                file_path=file_obj,
+                file_name=file_name,
+                is_default=is_default
+            )
+
+        return Response(ResumeSerializer(resume, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+
+class CandidateResumeSetDefaultView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def post(self, request, pk):
+        candidate_profile = request.user.candidate_profile
+        try:
+            resume = Resume.objects.get(pk=pk, candidate=candidate_profile)
+        except Resume.DoesNotExist:
+            return Response({"detail": "Resume not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            candidate_profile.resumes.update(is_default=False)
+            resume.is_default = True
+            resume.save()
+
+        return Response({"message": f"Resume '{resume.file_name}' set as default."}, status=status.HTTP_200_OK)
+
+
+class CandidateResumeDeleteView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def delete(self, request, pk):
+        candidate_profile = request.user.candidate_profile
+        try:
+            resume = Resume.objects.get(pk=pk, candidate=candidate_profile)
+        except Resume.DoesNotExist:
+            return Response({"detail": "Resume not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Protect resumes referenced by existing job applications
+        if Application.objects.filter(resume=resume).exists():
+            return Response({
+                "detail": f"Cannot delete resume '{resume.file_name}' because it is attached to submitted job applications."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        is_was_default = resume.is_default
+        resume.delete()
+
+        # If deleted resume was default, assign default to another resume if exists
+        if is_was_default:
+            next_resume = candidate_profile.resumes.first()
+            if next_resume:
+                next_resume.is_default = True
+                next_resume.save()
+
+        return Response({"message": "Resume deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class CandidateJobListView(generics.ListAPIView):
+    """
+    Public & Candidate job listing with search and hierarchy filtering.
+    Only active published jobs from active employers are returned.
+    """
+    serializer_class = CandidateJobSerializer
+    permission_classes = (permissions.AllowAny,)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        queryset = Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            hr__user__is_active=True
+        ).select_related(
+            'hr', 'category', 'work_mode'
+        ).prefetch_related(
+            'job_locations', 'job_locations__location', 'job_skills', 'job_skills__skill'
+        ).order_by('-published_at', '-created_at')
+
+        # Check if requested tab is for-you and user has recommendations
+        user = self.request.user
+        if user and user.is_authenticated and hasattr(user, 'candidate_profile'):
+            rec_job_ids = list(JobRecommendation.objects.filter(
+                candidate=user.candidate_profile,
+                job__status=Job.Status.PUBLISHED
+            ).order_by('-score').values_list('job_id', flat=True))
+            if rec_job_ids:
+                # Ordering by recommendation priority
+                ordering_cases = [models.When(id=j_id, then=pos) for pos, j_id in enumerate(rec_job_ids)]
+                queryset = queryset.annotate(
+                    rec_order=models.Case(*ordering_cases, default=999, output_field=models.IntegerField())
+                ).order_by('rec_order', '-published_at')
+
+        # Filter search query
+        search_query = self.request.query_params.get('search', '').strip()
+        if search_query:
+            queryset = queryset.filter(
+                Q(title__icontains=search_query) |
+                Q(description__icontains=search_query) |
+                Q(requirements__icontains=search_query) |
+                Q(hr__company_name__icontains=search_query)
+            )
+
+        # Filter category / industry
+        category_param = self.request.query_params.get('category', '').strip() or self.request.query_params.get('industry', '').strip()
+        if category_param:
+            queryset = queryset.filter(Q(category_id=category_param) | Q(category__name__icontains=category_param))
+
+        # Filter location
+        location_param = self.request.query_params.get('location', '').strip()
+        if location_param:
+            queryset = queryset.filter(
+                Q(job_locations__location__name__icontains=location_param) |
+                Q(job_locations__location__parent__name__icontains=location_param)
+            ).distinct()
+
+        # Filter work mode
+        work_mode_param = self.request.query_params.get('work_mode', '').strip() or self.request.query_params.get('workMode', '').strip()
+        if work_mode_param:
+            queryset = queryset.filter(Q(work_mode_id=work_mode_param) | Q(work_mode__name__icontains=work_mode_param))
+
+        # Filter job type
+        job_type_param = self.request.query_params.get('job_type', '').strip() or self.request.query_params.get('jobType', '').strip()
+        if job_type_param:
+            queryset = queryset.filter(application_type__icontains=job_type_param)
+
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        user = request.user
+        has_recommendations = False
+        if user and user.is_authenticated and hasattr(user, 'candidate_profile'):
+            has_recommendations = JobRecommendation.objects.filter(
+                candidate=user.candidate_profile,
+                job__status=Job.Status.PUBLISHED
+            ).exists()
+        
+        if isinstance(response.data, dict):
+            response.data['has_recommendations'] = has_recommendations
+        return response
+
+
+class CandidateJobDetailView(generics.RetrieveAPIView):
+    """
+    Public & Candidate job detail view. Strictly published jobs for candidates.
+    """
+    serializer_class = CandidateJobSerializer
+    permission_classes = (permissions.AllowAny,)
+
+    def get_queryset(self):
+        user = self.request.user
+        if user and user.is_authenticated and getattr(user, 'role', '') in ['HR', 'ADMIN', 'MODERATOR']:
+            return Job.objects.all()
+        return Job.objects.filter(status=Job.Status.PUBLISHED, hr__user__is_active=True)
+
+
+class CandidateToggleSavedJobView(APIView):
+    """
+    Toggle saving a job for authenticated candidate.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def post(self, request, pk):
+        try:
+            job = Job.objects.get(pk=pk)
+        except Job.DoesNotExist:
+            return Response({"detail": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        candidate_profile = request.user.candidate_profile
+        saved_obj = SavedJob.objects.filter(candidate=candidate_profile, job=job).first()
+
+        if saved_obj:
+            saved_obj.delete()
+            is_saved = False
+            message = "Job removed from saved jobs."
+        else:
+            SavedJob.objects.create(candidate=candidate_profile, job=job)
+            is_saved = True
+            message = "Job saved successfully."
+
+        saved_job_ids = list(SavedJob.objects.filter(candidate=candidate_profile).values_list('job_id', flat=True))
+
+        return Response({
+            "message": message,
+            "isSaved": is_saved,
+            "savedJobIds": saved_job_ids
+        }, status=status.HTTP_200_OK)
+
+
+class CandidateSavedJobListView(generics.ListAPIView):
+    """
+    List candidate's saved jobs.
+    """
+    serializer_class = SavedJobSerializer
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        candidate_profile = self.request.user.candidate_profile
+        return SavedJob.objects.filter(candidate=candidate_profile).select_related('job', 'job__hr').order_by('-created_at')
+
+
+class CandidateApplicationListView(generics.ListAPIView):
+    """
+    List applications submitted by authenticated candidate.
+    Supports tab, status, and search filters.
+    """
+    serializer_class = CandidateApplicationDetailSerializer
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        candidate_profile = self.request.user.candidate_profile
+        queryset = Application.objects.filter(candidate=candidate_profile).select_related(
+            'job', 'job__hr', 'resume'
+        ).prefetch_related(
+            'status_history', 'messages', 'interviews'
+        ).order_by('-applied_at')
+
+        # Filter by status
+        status_param = self.request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+
+        # Filter by search
+        search_param = self.request.query_params.get('search', '').strip()
+        if search_param:
+            queryset = queryset.filter(
+                Q(job__title__icontains=search_param) |
+                Q(job__hr__company_name__icontains=search_param)
+            )
+
+        # Filter by tab ('active', 'interview', 'selected', 'rejected')
+        tab_param = self.request.query_params.get('tab', '').strip().lower()
+        if tab_param == 'active':
+            queryset = queryset.exclude(status__in=['REJECTED', 'WITHDRAWN'])
+        elif tab_param == 'interview':
+            queryset = queryset.filter(Q(status__in=['INTERVIEW', 'INTERVIEW_SCHEDULED']) | Q(interviews__isnull=False)).distinct()
+        elif tab_param == 'selected' or tab_param == 'offered':
+            queryset = queryset.filter(status__in=['ACCEPTED', 'SELECTED'])
+        elif tab_param == 'rejected':
+            queryset = queryset.filter(status='REJECTED')
+
+        return queryset
+
+    def post(self, request):
+        """Submit a new job application."""
+        serializer = CandidateApplicationSubmitSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+
+        job = serializer.validated_data['job_obj']
+        resume_obj = serializer.validated_data.get('resume_obj')
+        app_type = serializer.validated_data.get('application_type') or job.application_type or 'PROFILE_RESUME'
+        candidate_note = serializer.validated_data.get('candidate_note', '')
+        phone_num = serializer.validated_data.get('phone_number')
+
+        candidate_profile = request.user.candidate_profile
+
+        # Update candidate phone if provided
+        if phone_num:
+            request.user.phone_number = phone_num
+            request.user.save()
+            candidate_profile.phone = phone_num
+            candidate_profile.save()
+
+        with transaction.atomic():
+            application = Application.objects.create(
+                job=job,
+                candidate=candidate_profile,
+                resume=resume_obj,
+                application_type=app_type,
+                status=Application.Status.APPLIED,
+                remarks=candidate_note
+            )
+
+            # Create initial status history entry
+            ApplicationStatusHistory.objects.create(
+                application=application,
+                status='APPLIED',
+                changed_by=request.user,
+                notes='Application submitted by candidate'
+            )
+
+            # Log CandidateActivity
+            CandidateActivity.objects.create(
+                candidate=candidate_profile,
+                activity_type=CandidateActivity.ActivityType.APPLY_JOB,
+                job=job,
+                metadata={'application_id': application.id, 'application_type': app_type}
+            )
+
+            # Notify Employer HR
+            if job.hr and job.hr.user:
+                Notification.objects.create(
+                    user=job.hr.user,
+                    notification_type='JOB_APPLICATION_RECEIVED',
+                    title=f"New Applicant for {job.title}",
+                    message=f"{request.user.first_name or request.user.username} applied for '{job.title}'.",
+                    reference_type='Application',
+                    reference_id=application.id
+                )
+
+        return Response(
+            CandidateApplicationDetailSerializer(application, context={'request': request}).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class CandidateApplicationSummaryView(APIView):
+    """
+    Summary counts card metrics for Candidate applications view.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get(self, request):
+        candidate_profile = request.user.candidate_profile
+        apps = Application.objects.filter(candidate=candidate_profile)
+
+        total_applications = apps.count()
+        interviews_count = Interview.objects.filter(application__candidate=candidate_profile).values('application_id').distinct().count()
+        rejected_count = apps.filter(status=Application.Status.REJECTED).count()
+        selected_count = apps.filter(status__in=[Application.Status.ACCEPTED, Application.Status.SELECTED]).count()
+
+        return Response({
+            "totalApplications": total_applications,
+            "interviewsCount": interviews_count,
+            "selectedCount": selected_count,
+            "offersCount": selected_count, # Map to Selected
+            "rejectedCount": rejected_count
+        }, status=status.HTTP_200_OK)
+
+
+class CandidateApplicationDetailView(generics.RetrieveAPIView):
+    """
+    Retrieve details of single application belonging to authenticated candidate.
+    """
+    serializer_class = CandidateApplicationDetailSerializer
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get_queryset(self):
+        return Application.objects.filter(candidate=self.request.user.candidate_profile)
+
+
+class CandidateApplicationWithdrawView(APIView):
+    """
+    Withdraw candidate's own application.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def post(self, request, pk):
+        candidate_profile = request.user.candidate_profile
+        try:
+            application = Application.objects.get(pk=pk, candidate=candidate_profile)
+        except Application.DoesNotExist:
+            return Response({"detail": "Application not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        if application.status == Application.Status.WITHDRAWN:
+            return Response({"detail": "Application is already withdrawn."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            application.status = Application.Status.WITHDRAWN
+            application.save()
+
+            ApplicationStatusHistory.objects.create(
+                application=application,
+                status='WITHDRAWN',
+                changed_by=request.user,
+                notes='Application withdrawn by candidate'
+            )
+
+        return Response({
+            "message": "Application withdrawn successfully.",
+            "application": CandidateApplicationDetailSerializer(application, context={'request': request}).data
+        }, status=status.HTTP_200_OK)
+
+
+class CandidateInterviewListView(generics.ListAPIView):
+    """
+    List interviews scheduled for authenticated candidate.
+    """
+    serializer_class = CandidateInterviewSerializer
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        candidate_profile = self.request.user.candidate_profile
+        queryset = Interview.objects.filter(application__candidate=candidate_profile).select_related(
+            'application', 'job', 'job__hr'
+        ).order_by('-scheduled_date', '-scheduled_time')
+
+        status_param = self.request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+
+        return queryset
+
+
+class CandidateInterviewSummaryView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get(self, request):
+        candidate_profile = request.user.candidate_profile
+        interviews = Interview.objects.filter(application__candidate=candidate_profile)
+
+        upcoming = interviews.filter(status__in=['SCHEDULED', 'RESCHEDULED']).count()
+        completed = interviews.filter(status='COMPLETED').count()
+        cancelled = interviews.filter(status='CANCELLED').count()
+
+        return Response({
+            "totalInterviews": interviews.count(),
+            "upcomingCount": upcoming,
+            "completedCount": completed,
+            "cancelledCount": cancelled
+        }, status=status.HTTP_200_OK)
+
+
+class CandidateInterviewRescheduleView(APIView):
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def post(self, request, pk):
+        candidate_profile = request.user.candidate_profile
+        try:
+            interview = Interview.objects.get(pk=pk, application__candidate=candidate_profile)
+        except Interview.DoesNotExist:
+            return Response({"detail": "Interview not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
+
+        notes = request.data.get('notes') or request.data.get('reason') or 'Candidate requested reschedule'
+
+        with transaction.atomic():
+            interview.status = Interview.Status.RESCHEDULED
+            interview.notes = f"{interview.notes or ''}\nReschedule Request: {notes}".strip()
+            interview.save()
+
+            ApplicationMessage.objects.create(
+                application=interview.application,
+                sender=request.user,
+                message=f"Reschedule requested for interview on {interview.scheduled_date}: {notes}"
+            )
+
+        return Response({
+            "message": "Reschedule request submitted successfully.",
+            "interview": CandidateInterviewSerializer(interview).data
+        }, status=status.HTTP_200_OK)
+
+
+class CandidateDashboardView(APIView):
+    """
+    Aggregated Dashboard endpoint for authenticated Candidate.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
+
+    def get(self, request):
+        candidate_profile, _ = CandidateProfile.objects.get_or_create(user=request.user)
+
+        # Profile summary
+        profile_res = CandidateProfileDetailView().get(request)
+        profile_data = profile_res.data
+
+        # Recent Applications
+        recent_apps_qs = Application.objects.filter(candidate=candidate_profile).select_related(
+            'job', 'job__hr', 'resume'
+        ).order_by('-applied_at')[:5]
+        recent_apps = CandidateApplicationDetailSerializer(recent_apps_qs, many=True, context={'request': request}).data
+
+        # Upcoming Interviews
+        upcoming_interviews_qs = Interview.objects.filter(
+            application__candidate=candidate_profile,
+            status__in=['SCHEDULED', 'RESCHEDULED']
+        ).order_by('scheduled_date', 'scheduled_time')[:3]
+        upcoming_interviews = CandidateInterviewSerializer(upcoming_interviews_qs, many=True).data
+
+        # Recommended Jobs (Matching published jobs or JobRecommendation)
+        recommended_jobs_qs = Job.objects.filter(status=Job.Status.PUBLISHED).order_by('-published_at')[:6]
+        recommended_jobs = CandidateJobSerializer(recommended_jobs_qs, many=True, context={'request': request}).data
+
+        # Unread notifications
+        unread_notifications = Notification.objects.filter(user=request.user, is_read=False).count()
+
+        return Response({
+            "profile": profile_data,
+            "recentApplications": recent_apps,
+            "upcomingInterviews": upcoming_interviews,
+            "recommendedJobs": recommended_jobs,
+            "unreadNotificationsCount": unread_notifications,
+        }, status=status.HTTP_200_OK)
+

@@ -934,8 +934,12 @@ class Application(models.Model):
     class Status(models.TextChoices):
         APPLIED = "APPLIED", "Applied"
         UNDER_REVIEW = "UNDER_REVIEW", "Under Review"
+        SHORTLISTED = "SHORTLISTED", "Shortlisted"
+        INTERVIEW = "INTERVIEW", "Interview Scheduled"
         ACCEPTED = "ACCEPTED", "Accepted"
+        SELECTED = "SELECTED", "Selected"
         REJECTED = "REJECTED", "Rejected"
+        WITHDRAWN = "WITHDRAWN", "Withdrawn"
 
     # PROTECT: a job with applications against it cannot be deleted out from
     # under them -- close it instead (Job.Status.CLOSED).
@@ -986,6 +990,12 @@ class Application(models.Model):
 
     class Meta:
         ordering = ('-applied_at',)
+        constraints = [
+            models.UniqueConstraint(
+                fields=['candidate', 'job'],
+                name='unique_candidate_job_application'
+            )
+        ]
 
     def __str__(self):
         return f"{self.candidate.user.username} -> {self.job.title} ({self.status})"

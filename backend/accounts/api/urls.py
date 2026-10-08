@@ -58,9 +58,11 @@ from .views import (
     CandidateInterviewSummaryView,
     CandidateInterviewRescheduleView,
     CandidateDashboardView,
+    PublicCompanyListView,
 )
 
 urlpatterns = [
+    path('companies/public/', PublicCompanyListView.as_view(), name='public_company_list'),
     path(
         'register/candidate/',
         CandidateRegisterView.as_view(),

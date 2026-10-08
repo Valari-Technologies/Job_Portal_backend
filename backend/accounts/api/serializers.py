@@ -1850,11 +1850,20 @@ class CandidateJobSerializer(serializers.ModelSerializer):
         return obj.hr.company_name if (obj.hr and obj.hr.company_name) else 'Employer'
 
     def get_company_logo(self, obj):
-        if obj.hr and obj.hr.company_logo:
+        if not obj.hr:
+            return None
+        logo = getattr(obj.hr, 'company_logo', None)
+        if not logo and hasattr(obj.hr, 'user') and obj.hr.user:
+            logo = getattr(obj.hr.user, 'profile_photo', None)
+        if not logo:
+            return None
+        if hasattr(logo, 'url'):
             try:
-                return obj.hr.company_logo.url
+                return logo.url
             except Exception:
-                return None
+                pass
+        if isinstance(logo, str) and logo.strip():
+            return logo.strip()
         return None
 
     def get_company_initials(self, obj):

@@ -2610,3 +2610,38 @@ class CandidateDashboardView(APIView):
             "unreadNotificationsCount": unread_notifications,
         }, status=status.HTTP_200_OK)
 
+
+class PublicCompanyListView(APIView):
+    """
+    Public directory of active employer companies and their logos.
+    Used across candidate and public portal views to display company logos.
+    """
+    permission_classes = (permissions.AllowAny,)
+
+    def get(self, request):
+        profiles = HRProfile.objects.filter(
+            user__is_active=True
+        ).exclude(company_name='').exclude(company_name__isnull=True).select_related('user')
+
+        data = []
+        for hr in profiles:
+            logo = hr.company_logo
+            if not logo and hr.user and getattr(hr.user, 'profile_picture', None):
+                try:
+                    logo = hr.user.profile_picture.url
+                except Exception:
+                    pass
+
+            data.append({
+                "id": hr.id,
+                "company_name": hr.company_name,
+                "company_logo": logo or None,
+                "company_website": hr.company_website or "",
+                "company_address": hr.company_address or "",
+                "company_description": hr.company_description or "",
+                "verification_status": hr.verification_status or "VERIFIED",
+                "trust_level": hr.trust_level or "NEW",
+            })
+        return Response(data, status=status.HTTP_200_OK)
+
+

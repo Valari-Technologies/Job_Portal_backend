@@ -1,3 +1,4 @@
+import os
 from django.utils import timezone
 from datetime import timedelta
 from rest_framework.pagination import PageNumberPagination
@@ -2164,16 +2165,22 @@ class CandidateResumeDeleteView(APIView):
         except Resume.DoesNotExist:
             return Response({"detail": "Resume not found or access denied."}, status=status.HTTP_404_NOT_FOUND)
 
-        # Protect resumes referenced by existing job applications
-        if Application.objects.filter(resume=resume).exists():
-            return Response({
-                "detail": f"Cannot delete resume '{resume.file_name}' because it is attached to submitted job applications."
-            }, status=status.HTTP_400_BAD_REQUEST)
-
         is_was_default = resume.is_default
+
+        # Detach from submitted applications so past job applications remain valid
+        # without foreign key constraint errors (Application.resume is nullable with SET_NULL)
+        Application.objects.filter(resume=resume).update(resume=None)
+
+        # Delete physical file from disk if it exists
+        try:
+            if resume.file_path and hasattr(resume.file_path, 'path') and os.path.isfile(resume.file_path.path):
+                os.remove(resume.file_path.path)
+        except Exception:
+            pass
+
         resume.delete()
 
-        # If deleted resume was default, assign default to another resume if exists
+        # If deleted resume was default, assign default to another remaining resume if exists
         if is_was_default:
             next_resume = candidate_profile.resumes.first()
             if next_resume:

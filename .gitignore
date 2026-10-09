@@ -1,0 +1,31 @@
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+env/
+ENV/
+
+# Python cache files
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files (sensitive credentials)
+.env
+backend/.env
+
+# User uploaded media files (Resumes, Profile Pictures, Logos)
+media/
+backend/media/
+
+# Static files
+staticfiles/
+
+# Database files
+*.sqlite3
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

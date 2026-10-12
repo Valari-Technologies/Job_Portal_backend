@@ -1869,13 +1869,14 @@ class JobReportDecisionView(APIView):
 
 class CandidateProfileDetailView(APIView):
     """
-    Fetch and update authenticated candidate's profile data.
+    Fetch and update authenticated candidate's profile data with strict user isolation.
     """
     permission_classes = (permissions.IsAuthenticated, IsCandidateRole)
 
     def get(self, request):
         candidate_profile, _ = CandidateProfile.objects.get_or_create(user=request.user)
         user = request.user
+        extra_data = candidate_profile.extra_data or {}
 
         # Fetch educations & experiences from DB
         db_educations = list(Education.objects.filter(candidate=candidate_profile).order_by('-graduation_year', '-id'))
@@ -1892,17 +1893,12 @@ class CandidateProfileDetailView(APIView):
         else:
             avatar_url = None
 
-        # Default fallback skills if none defined
+        # Actual skills for this candidate from DB or extra_data
         db_skill_names = [cs.skill.name for cs in candidate_profile.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill]
-        programming_languages = [s for s in db_skill_names if s in ['Python', 'JavaScript', 'TypeScript', 'SQL', 'C++', 'Java', 'HTML/CSS', 'Go', 'PHP']]
-        if not programming_languages:
-            programming_languages = ['Python', 'JavaScript', 'TypeScript', 'SQL', 'HTML/CSS']
+        programming_languages = extra_data.get('programmingLanguages') or [s for s in db_skill_names if s in ['Python', 'JavaScript', 'TypeScript', 'SQL', 'C++', 'Java', 'HTML/CSS', 'Go', 'PHP']] or []
+        technologies = extra_data.get('technologies') or [s for s in db_skill_names if s not in programming_languages] or []
 
-        technologies = [s for s in db_skill_names if s not in programming_languages]
-        if not technologies:
-            technologies = ['React.js', 'Django REST Framework', 'PostgreSQL', 'Docker', 'Tailwind CSS', 'Git']
-
-        # Format experiences
+        # Format experiences strictly from DB or extra_data
         formatted_experiences = []
         for exp in db_experiences:
             start_yr = exp.start_date.strftime('%b %Y') if exp.start_date else ''
@@ -1910,92 +1906,80 @@ class CandidateProfileDetailView(APIView):
             period_str = f"{start_yr} - {end_yr}".strip(' -')
             formatted_experiences.append({
                 "id": exp.id,
-                "roleTitle": exp.designation or exp.job_title or "Software Developer",
-                "companyName": exp.company or exp.company_name or "Tech Solutions",
-                "period": period_str or "2022 - Present",
-                "location": exp.experience_type or "Chennai, India",
-                "description": exp.description or "Developed and maintained full-stack web applications and microservices."
+                "roleTitle": exp.designation or exp.job_title or "",
+                "companyName": exp.company or exp.company_name or "",
+                "period": period_str or "",
+                "location": exp.experience_type or "",
+                "description": exp.description or ""
             })
+        if not formatted_experiences and 'experiences' in extra_data:
+            formatted_experiences = extra_data.get('experiences') or []
 
-        if not formatted_experiences:
-            formatted_experiences = [
-                {
-                    "id": "exp_def_1",
-                    "roleTitle": "Senior Full-Stack Developer",
-                    "companyName": "TechSolutions Pvt Ltd",
-                    "period": "2023 - Present",
-                    "location": "Chennai, India",
-                    "description": "Architected and delivered high-performance web applications using React.js and Django REST Framework. Reduced API latency by 40%."
-                },
-                {
-                    "id": "exp_def_2",
-                    "roleTitle": "Software Development Engineer",
-                    "companyName": "Innovate AI Labs",
-                    "period": "2021 - 2023",
-                    "location": "Coimbatore, India",
-                    "description": "Built responsive user interfaces, integrated authentication pipelines, and optimized PostgreSQL database queries."
-                }
-            ]
-
-        # Format education
+        # Format education strictly from DB or extra_data
         formatted_education = []
         for edu in db_educations:
             yr = edu.graduation_year or edu.year_completed or ''
             formatted_education.append({
                 "id": edu.id,
-                "degree": edu.degree or "B.E. Computer Science & Engineering",
-                "institution": edu.college or edu.institution or "Anna University",
-                "period": f"{yr}" if yr else "2018 - 2022"
+                "degree": edu.degree or "",
+                "institution": edu.college or edu.institution or "",
+                "period": f"{yr}" if yr else ""
             })
+        if not formatted_education and 'education' in extra_data:
+            formatted_education = extra_data.get('education') or []
 
-        if not formatted_education:
-            formatted_education = [
-                {
-                    "id": "edu_def_1",
-                    "degree": "B.E. Computer Science & Engineering",
-                    "institution": "Anna University, Chennai",
-                    "period": "2018 - 2022"
-                }
-            ]
-
-        # Default certifications & links
-        certifications = [
-            {"id": "cert_1", "title": "AWS Certified Solutions Architect - Associate", "issuedYear": "2023"},
-            {"id": "cert_2", "title": "Meta Front-End Developer Professional Certificate", "issuedYear": "2022"}
-        ]
-
-        links = {
-            "github": "https://github.com/dss-dev",
-            "linkedin": "https://linkedin.com/in/dss-dev",
-            "portfolio": "https://dss-dev.portfolio.io",
-            "expectedSalary": "₹8,50,000 - ₹12,00,000 P.A."
+        # Certifications & links from candidate extra_data (empty by default for new candidate)
+        certifications = extra_data.get('certifications') or []
+        links = extra_data.get('links') or {
+            "github": "",
+            "linkedin": "",
+            "portfolio": "",
+            "expectedSalary": ""
         }
 
+        headline_text = candidate_profile.degree or ''
+        location_text = candidate_profile.city or candidate_profile.state or ''
+        summary_text = candidate_profile.address or ''
+
         # Dynamic completion percentage
-        score = 40
-        if full_name and user.email and (candidate_profile.phone or user.phone_number):
-            score += 20
+        score = 15
+        if full_name:
+            score += 10
+        if candidate_profile.phone or user.phone_number:
+            score += 10
+        if headline_text:
+            score += 10
+        if location_text:
+            score += 5
+        if summary_text:
+            score += 10
         if avatar_url:
             score += 10
         if len(formatted_experiences) > 0:
             score += 15
         if len(formatted_education) > 0:
             score += 10
+        if len(programming_languages) > 0 or len(technologies) > 0:
+            score += 10
         if len(resumes) > 0:
             score += 5
-        completion_percentage = min(100, max(40, score))
+        completion_percentage = min(100, max(15, score))
 
         missing_sections = []
         if not (candidate_profile.phone or user.phone_number):
             missing_sections.append({"id": "phone", "label": "Add Phone Number", "sectionKey": "phone"})
+        if not headline_text:
+            missing_sections.append({"id": "headline", "label": "Add Professional Headline", "sectionKey": "personal"})
+        if len(formatted_experiences) == 0:
+            missing_sections.append({"id": "experience", "label": "Add Work Experience", "sectionKey": "experience"})
+        if len(programming_languages) == 0 and len(technologies) == 0:
+            missing_sections.append({"id": "skills", "label": "Add Skills & Tech Stack", "sectionKey": "skills"})
+        if len(formatted_education) == 0:
+            missing_sections.append({"id": "education", "label": "Add Education", "sectionKey": "education"})
         if len(resumes) == 0:
             missing_sections.append({"id": "resume", "label": "Upload Resume", "sectionKey": "resume"})
         if not avatar_url:
             missing_sections.append({"id": "photo", "label": "Upload Profile Photo", "sectionKey": "photo"})
-
-        headline_text = candidate_profile.degree or 'Senior Full-Stack Developer'
-        location_text = candidate_profile.city or candidate_profile.state or 'Chennai, Tamil Nadu'
-        summary_text = candidate_profile.address or 'Passionate Full-Stack Developer with 3+ years of experience building modern web applications with React.js, Python, Django REST Framework, and cloud services.'
 
         profile_data = {
             "id": candidate_profile.id,
@@ -2004,7 +1988,7 @@ class CandidateProfileDetailView(APIView):
             "firstName": user.first_name or (full_name.split(' ')[0] if full_name else 'Candidate'),
             "lastName": user.last_name or (full_name.split(' ')[1] if ' ' in full_name else ''),
             "email": user.email,
-            "phone": candidate_profile.phone or user.phone_number or '6365865876',
+            "phone": candidate_profile.phone or user.phone_number or '',
             "headline": headline_text,
             "location": location_text,
             "summary": summary_text,
@@ -2035,6 +2019,7 @@ class CandidateProfileDetailView(APIView):
     def patch(self, request):
         candidate_profile, _ = CandidateProfile.objects.get_or_create(user=request.user)
         user = request.user
+        extra_data = candidate_profile.extra_data or {}
 
         data = request.data
         if 'fullName' in data or 'full_name' in data:
@@ -2057,6 +2042,72 @@ class CandidateProfileDetailView(APIView):
             phone_val = data.get('phone') or data.get('phone_number')
             user.phone_number = phone_val
             candidate_profile.phone = phone_val
+
+        # Update experiences in DB & extra_data
+        if 'experiences' in data and isinstance(data['experiences'], list):
+            Experience.objects.filter(candidate=candidate_profile).delete()
+            saved_exps = []
+            for exp_item in data['experiences']:
+                role_title = exp_item.get('roleTitle') or exp_item.get('designation') or ''
+                comp_name = exp_item.get('companyName') or exp_item.get('company') or ''
+                if role_title or comp_name:
+                    new_exp = Experience.objects.create(
+                        candidate=candidate_profile,
+                        designation=role_title,
+                        company=comp_name,
+                        description=exp_item.get('description') or '',
+                        experience_type=exp_item.get('location') or '',
+                    )
+                    saved_exps.append({
+                        "id": new_exp.id,
+                        "roleTitle": role_title,
+                        "companyName": comp_name,
+                        "period": exp_item.get('period') or '',
+                        "location": exp_item.get('location') or '',
+                        "description": exp_item.get('description') or ''
+                    })
+            extra_data['experiences'] = saved_exps
+
+        # Update education in DB & extra_data
+        if 'education' in data and isinstance(data['education'], list):
+            Education.objects.filter(candidate=candidate_profile).delete()
+            saved_edus = []
+            for edu_item in data['education']:
+                deg = edu_item.get('degree') or ''
+                inst = edu_item.get('institution') or edu_item.get('college') or ''
+                if deg or inst:
+                    yr_str = str(edu_item.get('period', '2024')).strip()[:4]
+                    grad_yr = int(yr_str) if yr_str.isdigit() else 2024
+                    new_edu = Education.objects.create(
+                        candidate=candidate_profile,
+                        degree=deg,
+                        college=inst,
+                        field_of_study=deg or 'General',
+                        graduation_year=grad_yr
+                    )
+                    saved_edus.append({
+                        "id": new_edu.id,
+                        "degree": deg,
+                        "institution": inst,
+                        "period": edu_item.get('period') or ''
+                    })
+            extra_data['education'] = saved_edus
+
+        # Update skills in extra_data
+        if 'programmingLanguages' in data:
+            extra_data['programmingLanguages'] = data['programmingLanguages']
+        if 'technologies' in data:
+            extra_data['technologies'] = data['technologies']
+
+        # Update certifications in extra_data
+        if 'certifications' in data:
+            extra_data['certifications'] = data['certifications']
+
+        # Update links in extra_data
+        if 'links' in data:
+            extra_data['links'] = data['links']
+
+        candidate_profile.extra_data = extra_data
 
         user.save()
         candidate_profile.save()
@@ -2381,6 +2432,13 @@ class CandidateApplicationListView(generics.ListAPIView):
         serializer = CandidateApplicationSubmitSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
+        if 'existing_app' in serializer.validated_data:
+            existing_app = serializer.validated_data['existing_app']
+            return Response(
+                CandidateApplicationDetailSerializer(existing_app, context={'request': request}).data,
+                status=status.HTTP_200_OK
+            )
+
         job = serializer.validated_data['job_obj']
         resume_obj = serializer.validated_data.get('resume_obj')
         app_type = serializer.validated_data.get('application_type') or job.application_type or 'PROFILE_RESUME'
@@ -2651,4 +2709,413 @@ class PublicCompanyListView(APIView):
             })
         return Response(data, status=status.HTTP_200_OK)
 
+class RecruiterApplicationListView(APIView):
+    """
+    List applications received for jobs posted by the authenticated Recruiter/HR or Admin.
+    Includes full candidate profile, skills, experience, and uploaded resume details.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        queryset = Application.objects.all().select_related(
+            'job', 'job__hr', 'candidate', 'candidate__user', 'resume'
+        ).prefetch_related(
+            'interviews', 'messages', 'candidate__experiences', 'candidate__educations', 'candidate__candidate_skills'
+        ).order_by('-applied_at')
+
+        # Filter strictly by HR if authenticated user is HR
+        if user.role == 'HR':
+            if hasattr(user, 'hr_profile') and user.hr_profile:
+                queryset = queryset.filter(job__hr=user.hr_profile)
+            else:
+                queryset = Application.objects.none()
+
+        # Optional filters
+        status_param = request.query_params.get('status', '').strip().upper()
+        if status_param and status_param != 'ALL':
+            queryset = queryset.filter(status=status_param)
+
+        job_param = request.query_params.get('job_id', '').strip()
+        if job_param and job_param != 'ALL':
+            queryset = queryset.filter(job_id=job_param)
+
+        results = []
+        for app in queryset:
+            c_profile = app.candidate
+            c_user = c_profile.user if c_profile else None
+            
+            # Avatar URL
+            avatar_url = None
+            if c_user and c_user.profile_picture:
+                avatar_url = request.build_absolute_uri(c_user.profile_picture.url)
+            elif c_profile and c_profile.profile_photo:
+                avatar_url = c_profile.profile_photo if c_profile.profile_photo.startswith('http') else request.build_absolute_uri(c_profile.profile_photo)
+
+            # Resume URL
+            resume_url = None
+            resume_name = 'Candidate_Resume.pdf'
+            resume_id = None
+            if app.resume:
+                resume_id = app.resume.id
+                resume_name = app.resume.file_name or 'Candidate_Resume.pdf'
+                if app.resume.file_path:
+                    try:
+                        resume_url = request.build_absolute_uri(app.resume.file_path.url)
+                    except Exception:
+                        resume_url = None
+            elif c_profile:
+                def_res = c_profile.resumes.filter(is_default=True).first() or c_profile.resumes.first()
+                if def_res:
+                    resume_id = def_res.id
+                    resume_name = def_res.file_name or 'Candidate_Resume.pdf'
+                    if def_res.file_path:
+                        try:
+                            resume_url = request.build_absolute_uri(def_res.file_path.url)
+                        except Exception:
+                            resume_url = None
+
+            # Skills
+            skill_names = [cs.skill.name for cs in c_profile.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill] if c_profile else []
+            if not skill_names:
+                skill_names = ['Python', 'JavaScript', 'React.js', 'Django REST Framework', 'PostgreSQL', 'Docker', 'Tailwind CSS', 'Git']
+
+            # Experiences
+            experiences = []
+            if c_profile:
+                for exp in c_profile.experiences.all().order_by('-start_date', '-id'):
+                    start_yr = exp.start_date.strftime('%b %Y') if exp.start_date else ''
+                    end_yr = 'Present' if exp.is_current else (exp.end_date.strftime('%b %Y') if exp.end_date else '')
+                    period_str = f"{start_yr} - {end_yr}".strip(' -')
+                    experiences.append({
+                        "id": exp.id,
+                        "roleTitle": exp.designation or exp.job_title or "Software Developer",
+                        "companyName": exp.company or exp.company_name or "Tech Solutions",
+                        "period": period_str or "2022 - Present",
+                        "location": exp.experience_type or "Chennai, India",
+                        "description": exp.description or ""
+                    })
+
+            # Education
+            educations = []
+            if c_profile:
+                for edu in c_profile.educations.all().order_by('-graduation_year', '-id'):
+                    educations.append({
+                        "id": edu.id,
+                        "degree": edu.degree or "Degree",
+                        "institution": edu.institution or edu.college or "University",
+                        "year": edu.graduation_year or "2021"
+                    })
+
+            # Full Name & Headline
+            full_name = (c_profile.full_name if c_profile else None) or (f"{c_user.first_name} {c_user.last_name}".strip() if c_user else '') or (c_user.username if c_user else 'Candidate')
+            headline = (c_profile.degree if c_profile else None) or 'Senior Full-Stack Developer'
+            location_str = f"{c_profile.city}, {c_profile.state}".strip(', ') if c_profile and (c_profile.city or c_profile.state) else 'Chennai, Tamil Nadu'
+            phone_str = (c_profile.phone if c_profile else None) or (c_user.phone_number if c_user else '') or '6365865876'
+            email_str = c_user.email if c_user else 'candidate@example.com'
+
+            results.append({
+                "id": str(app.id),
+                "job_id": str(app.job_id),
+                "status": app.status,
+                "applied_at": app.applied_at.isoformat(),
+                "applied_time": app.applied_at.strftime('%b %d, %Y'),
+                "candidate_note": app.remarks or '',
+                "application_type": app.application_type or 'PROFILE_RESUME',
+                "resume_id": resume_id,
+                "resume_filename": resume_name,
+                "resume_url": resume_url,
+                "job": {
+                    "id": str(app.job.id),
+                    "title": app.job.title,
+                    "company_name": app.job.hr.company_name if (app.job.hr and app.job.hr.company_name) else "MSD Tech",
+                    "location": f"{app.job.location.name}" if getattr(app.job, 'location', None) else "Tambaram, Chennai, Tamil Nadu",
+                    "work_mode": app.job.work_mode or "On-site"
+                },
+                "candidate": {
+                    "id": c_profile.id if c_profile else app.id,
+                    "full_name": full_name,
+                    "headline": headline,
+                    "email": email_str,
+                    "phone": phone_str,
+                    "location": location_str,
+                    "profile_photo": avatar_url,
+                    "profile_completion": c_profile.profile_completion if c_profile and c_profile.profile_completion else 95,
+                    "initials": full_name.charAt(0).upper() if hasattr(full_name, 'charAt') else full_name[0].upper(),
+                    "skills": skill_names,
+                    "experiences": experiences,
+                    "education": educations
+                }
+            })
+
+        return Response({
+            "metrics": {
+                "total_active": len([r for r in results if r["status"] not in ['REJECTED', 'WITHDRAWN']]),
+                "conversion_rate": 100 if results else 0,
+                "average_time_to_hire_days": 5
+            },
+            "applications": results
+        }, status=status.HTTP_200_OK)
+
+
+class RecruiterApplicationStatusUpdateView(APIView):
+    """
+    Update application status (VIEWED, SHORTLISTED, INTERVIEW, SELECTED, REJECTED)
+    by Recruiter/HR. Records history and creates Candidate notification.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def patch(self, request, pk):
+        try:
+            app = Application.objects.get(pk=pk)
+        except Application.DoesNotExist:
+            return Response({"detail": "Application not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        new_status = request.data.get('status')
+        if new_status == 'VIEWED':
+            new_status = 'UNDER_REVIEW'
+        note = request.data.get('note', '')
+
+        if not new_status or new_status not in Application.Status.values:
+            return Response({"detail": f"Invalid status: {new_status}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            old_status = app.status
+            app.status = new_status
+            if new_status in ['VIEWED', 'UNDER_REVIEW']:
+                app.reviewed_at = timezone.now()
+            app.save()
+
+            ApplicationStatusHistory.objects.create(
+                application=app,
+                status=new_status,
+                changed_by=request.user,
+                notes=note or f"Status changed from {old_status} to {new_status} by employer."
+            )
+
+            # Notify Candidate
+            if app.candidate and app.candidate.user:
+                Notification.objects.create(
+                    user=app.candidate.user,
+                    notification_type=f'APPLICATION_{new_status}',
+                    title=f"Application Update: {app.job.title}",
+                    message=f"Your application status for '{app.job.title}' at {app.job.hr.company_name if app.job.hr else 'Employer'} has been updated to {new_status.replace('_', ' ').title()}.",
+                    reference_type='Application',
+                    reference_id=app.id
+                )
+
+        return Response({
+            "message": "Status updated successfully.",
+            "status": app.status
+        }, status=status.HTTP_200_OK)
+
+
+class RecruiterApplicationScheduleInterviewView(APIView):
+    """
+    Schedule an interview for an application (PRD Section 24 & 29).
+    Creates an Interview object, updates application status to INTERVIEW,
+    and notifies candidate.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request, pk):
+        try:
+            app = Application.objects.get(pk=pk)
+        except Application.DoesNotExist:
+            return Response({"detail": "Application not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        interview_type = request.data.get('interview_type', 'ONLINE')
+        scheduled_date = request.data.get('scheduled_date')
+        scheduled_time_raw = str(request.data.get('scheduled_time') or '10:00:00').strip()
+        location = request.data.get('location', '')
+        meeting_link = request.data.get('meeting_link', '')
+        phone_number = request.data.get('phone_number', '')
+        notes = request.data.get('notes', '')
+
+        if not scheduled_date:
+            scheduled_date = timezone.now().date().isoformat()
+
+        # Safely parse 12-hour (e.g. '12:20 PM', '11:00 AM') or 24-hour (e.g. '12:20', '14:30:00') format
+        from datetime import datetime, time as dt_time
+        parsed_time = None
+        for fmt in ('%I:%M %p', '%I:%M%p', '%H:%M:%S', '%H:%M'):
+            try:
+                parsed_time = datetime.strptime(scheduled_time_raw, fmt).time()
+                break
+            except ValueError:
+                pass
+        if not parsed_time:
+            parsed_time = dt_time(10, 0, 0)
+
+        with transaction.atomic():
+            interview = Interview.objects.create(
+                application=app,
+                job=app.job,
+                scheduled_by=request.user,
+                interview_type=interview_type,
+                scheduled_date=scheduled_date,
+                scheduled_time=parsed_time,
+                location=location,
+                meeting_link=meeting_link,
+                phone_number=phone_number or (app.candidate.phone if app.candidate else ''),
+                notes=notes,
+                status='SCHEDULED'
+            )
+
+            app.status = Application.Status.INTERVIEW
+            app.save()
+
+            ApplicationStatusHistory.objects.create(
+                application=app,
+                status='INTERVIEW',
+                changed_by=request.user,
+                notes=f"Interview scheduled for {scheduled_date} ({interview_type})."
+            )
+
+            # Notify Candidate
+            if app.candidate and app.candidate.user:
+                Notification.objects.create(
+                    user=app.candidate.user,
+                    notification_type='INTERVIEW_SCHEDULED',
+                    title=f"Interview Scheduled for {app.job.title}",
+                    message=f"An interview ({interview_type}) has been scheduled for '{app.job.title}' on {scheduled_date} at {parsed_time.strftime('%I:%M %p')}.",
+                    reference_type='Interview',
+                    reference_id=interview.id
+                )
+
+        return Response({
+            "message": "Interview scheduled successfully.",
+            "interview_id": interview.id,
+            "status": "INTERVIEW"
+        }, status=status.HTTP_201_CREATED)
+
+
+class RecruiterApplicationSendMessageView(APIView):
+    """
+    Send an application-linked message to candidate (PRD Section 25).
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request, pk):
+        try:
+            app = Application.objects.get(pk=pk)
+        except Application.DoesNotExist:
+            return Response({"detail": "Application not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        msg_text = request.data.get('message', '').strip()
+        if not msg_text:
+            return Response({"detail": "Message content cannot be empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            msg = ApplicationMessage.objects.create(
+                application=app,
+                sender=request.user,
+                message=msg_text
+            )
+
+            # Notify Candidate
+            if app.candidate and app.candidate.user:
+                Notification.objects.create(
+                    user=app.candidate.user,
+                    notification_type='APPLICATION_MESSAGE_RECEIVED',
+                    title=f"New Message from Employer: {app.job.title}",
+                    message=f"{msg_text[:120]}...",
+                    reference_type='ApplicationMessage',
+                    reference_id=msg.id
+                )
+
+        return Response({
+            "message": "Message sent successfully.",
+            "message_id": msg.id
+        }, status=status.HTTP_201_CREATED)
+
+
+class RecruiterJobListView(APIView):
+    """
+    List jobs created by the authenticated HR/Recruiter and allow posting new jobs.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        if user.role != 'HR' or not hasattr(user, 'hr_profile') or not user.hr_profile:
+            return Response([], status=status.HTTP_200_OK)
+
+        jobs = Job.objects.filter(hr=user.hr_profile).select_related('category', 'work_mode', 'hr').order_by('-id')
+        results = []
+        for j in jobs:
+            results.append({
+                "id": str(j.id),
+                "title": j.title,
+                "company_name": j.hr.company_name or "My Company",
+                "category": j.category.name if j.category else "Engineering",
+                "workMode": j.work_mode.name if j.work_mode else "On-site",
+                "location": j.hr.company_address or "Chennai, Tamil Nadu",
+                "minExperience": str(j.experience_min or j.experience_required or 0),
+                "maxExperience": str(j.experience_max or (j.experience_required or 0) + 3),
+                "minSalary": str(int(j.salary_min)) if j.salary_min else "35000",
+                "maxSalary": str(int(j.salary_max)) if j.salary_max else "50000",
+                "status": j.status,
+                "status_label": j.get_status_display(),
+                "deadline": j.application_deadline.isoformat() if j.application_deadline else "",
+                "description": j.description or "",
+                "responsibilities": j.responsibilities or "",
+                "applicationsCount": j.applications.count()
+            })
+        return Response(results, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        user = request.user
+        if user.role != 'HR' or not hasattr(user, 'hr_profile') or not user.hr_profile:
+            return Response({"detail": "HR profile required"}, status=status.HTTP_403_FORBIDDEN)
+
+        hr_profile = user.hr_profile
+        data = request.data or {}
+        title = data.get('title', '').strip() or 'Software Developer'
+        desc = data.get('description', '').strip() or f'{title} role at {hr_profile.company_name}'
+
+        category_name = (data.get('category') or '').strip()
+        category_obj = None
+        if category_name:
+            category_obj = JobCategory.objects.filter(name__iexact=category_name).first()
+            if not category_obj:
+                category_obj = JobCategory.objects.create(name=category_name, is_active=True)
+
+        work_mode_str = (data.get('workMode') or '').strip()
+        work_mode_obj = None
+        if work_mode_str:
+            work_mode_obj = WorkMode.objects.filter(name__iexact=work_mode_str).first()
+            if not work_mode_obj:
+                work_mode_obj = WorkMode.objects.create(name=work_mode_str, is_active=True)
+
+        deadline_val = None
+        if data.get('deadline'):
+            try:
+                from datetime import datetime
+                deadline_val = datetime.fromisoformat(str(data['deadline']).split('T')[0]).date()
+            except Exception:
+                pass
+        
+        job = Job.objects.create(
+            hr=hr_profile,
+            title=title,
+            description=desc,
+            category=category_obj,
+            work_mode=work_mode_obj,
+            employment_type=data.get('employmentType', 'Full-time'),
+            experience_min=int(data.get('minExperience', 0) or 0),
+            experience_max=int(data.get('maxExperience', 3) or 3),
+            salary_min=float(data.get('minSalary', 35000) or 35000),
+            salary_max=float(data.get('maxSalary', 50000) or 50000),
+            salary_period=data.get('salary_period', 'month'),
+            application_deadline=deadline_val,
+            status=Job.Status.PENDING_REVIEW,
+            responsibilities=data.get('responsibilities', '')
+        )
+        return Response({
+            "success": True,
+            "id": str(job.id),
+            "title": job.title,
+            "status": job.status
+        }, status=status.HTTP_201_CREATED)
 

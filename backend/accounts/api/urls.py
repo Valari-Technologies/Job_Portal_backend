@@ -59,6 +59,11 @@ from .views import (
     CandidateInterviewRescheduleView,
     CandidateDashboardView,
     PublicCompanyListView,
+    RecruiterApplicationListView,
+    RecruiterApplicationStatusUpdateView,
+    RecruiterApplicationScheduleInterviewView,
+    RecruiterApplicationSendMessageView,
+    RecruiterJobListView,
 )
 
 urlpatterns = [
@@ -302,4 +307,11 @@ urlpatterns = [
     path('candidate/interviews/summary/', CandidateInterviewSummaryView.as_view(), name='candidate_interview_summary'),
     path('candidate/interviews/<int:pk>/reschedule/', CandidateInterviewRescheduleView.as_view(), name='candidate_interview_reschedule'),
     path('candidate/dashboard/', CandidateDashboardView.as_view(), name='candidate_dashboard'),
+
+    # Recruiter Applications Endpoints
+    path('recruiter/applications/', RecruiterApplicationListView.as_view(), name='recruiter_applications_list'),
+    path('recruiter/applications/<int:pk>/status/', RecruiterApplicationStatusUpdateView.as_view(), name='recruiter_application_status_update'),
+    path('recruiter/applications/<int:pk>/interview/', RecruiterApplicationScheduleInterviewView.as_view(), name='recruiter_application_schedule_interview'),
+    path('recruiter/applications/<int:pk>/message/', RecruiterApplicationSendMessageView.as_view(), name='recruiter_application_send_message'),
+    path('recruiter/jobs/', RecruiterJobListView.as_view(), name='recruiter_jobs_list_create'),
 ]

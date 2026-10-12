@@ -455,6 +455,10 @@ class CandidateProfile(models.Model):
     profile_completion = models.IntegerField(
         default=0
     )
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )

@@ -471,6 +471,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
     role = serializers.ChoiceField(choices=[(User.Role.ADMIN, 'Admin'), (User.Role.HR, 'HR'), (User.Role.CANDIDATE, 'Candidate')], default=User.Role.ADMIN)
     status = serializers.ChoiceField(choices=User.Status.choices, default=User.Status.ACTIVE, required=False)
     account_status = serializers.CharField(required=False, allow_blank=True)
+    account_email = serializers.CharField(write_only=True, required=False, allow_blank=True)
     company_name = serializers.CharField(required=False, allow_blank=True)
     designation = serializers.CharField(required=False, allow_blank=True)
     company_email = serializers.CharField(required=False, allow_blank=True)
@@ -496,6 +497,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'email',
+            'account_email',
             'password',
             'confirm_password',
             'confirmPassword',
@@ -530,10 +532,19 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             'designation',
         )
 
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            data = data.copy()
+            if not data.get('email') and data.get('account_email'):
+                data['email'] = data['account_email']
+            if not data.get('account_email') and data.get('email'):
+                data['account_email'] = data['email']
+        return super().to_internal_value(data)
+
     def validate_email(self, value):
         email = value.lower().strip()
         if User.objects.filter(email__iexact=email).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
+            raise serializers.ValidationError("An account with this email address already exists. Please choose a different account email.")
         return email
 
     def validate_role(self, value):
@@ -565,6 +576,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        validated_data.pop('account_email', None)
         validated_data.pop('confirmPassword', None)
         validated_data.pop('confirm_password', None)
         company_name = validated_data.pop('company_name', None)
@@ -921,6 +933,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     
     email = serializers.EmailField(write_only=True)
     password = serializers.CharField(write_only=True, style={'input_type': 'password'})
+    expected_role = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    role = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     @classmethod
     def get_token(cls, user):
@@ -983,6 +997,67 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 request=self.context.get('request')
             )
             raise serializers.ValidationError({"detail": "Invalid email or password."})
+
+        # Check expected role if provided
+        expected_role = (
+            attrs.get('expected_role') or 
+            attrs.get('role') or 
+            (self.context.get('request') and self.context.get('request').data.get('expected_role')) or 
+            (self.context.get('request') and self.context.get('request').data.get('role'))
+        )
+        if expected_role:
+            exp = expected_role.strip().upper()
+            if exp == 'CANDIDATE' and self.user.role != User.Role.CANDIDATE:
+                log_audit_event(
+                    actor=self.user,
+                    actor_email=email,
+                    action='LOGIN_FAILED',
+                    target_type='User',
+                    target_id=self.user.id,
+                    target_repr=email,
+                    outcome='FAILED',
+                    description=f"Failed login attempt for {email}: Role mismatch (expected CANDIDATE, actual {self.user.role})",
+                    request=self.context.get('request')
+                )
+                msg = (
+                    "This account is registered as an HR / Recruiter. Please switch to the 'HR / Recruiter' tab to login."
+                    if self.user.role == User.Role.HR
+                    else "Access denied. Candidate login only."
+                )
+                raise serializers.ValidationError({"detail": msg})
+
+            elif exp in ['HR', 'RECRUITER'] and self.user.role != User.Role.HR:
+                log_audit_event(
+                    actor=self.user,
+                    actor_email=email,
+                    action='LOGIN_FAILED',
+                    target_type='User',
+                    target_id=self.user.id,
+                    target_repr=email,
+                    outcome='FAILED',
+                    description=f"Failed login attempt for {email}: Role mismatch (expected HR, actual {self.user.role})",
+                    request=self.context.get('request')
+                )
+                msg = (
+                    "This account is registered as a Candidate. Please switch to the 'Candidate' tab to login."
+                    if self.user.role == User.Role.CANDIDATE
+                    else "Access denied. HR / Recruiter login only."
+                )
+                raise serializers.ValidationError({"detail": msg})
+
+            elif exp in ['ADMIN', 'SUPER_ADMIN', 'ADMIN_PORTAL'] and self.user.role not in [User.Role.ADMIN, User.Role.SUPER_ADMIN]:
+                log_audit_event(
+                    actor=self.user,
+                    actor_email=email,
+                    action='LOGIN_FAILED',
+                    target_type='User',
+                    target_id=self.user.id,
+                    target_repr=email,
+                    outcome='FAILED',
+                    description=f"Failed login attempt for {email}: Role mismatch (expected ADMIN, actual {self.user.role})",
+                    request=self.context.get('request')
+                )
+                raise serializers.ValidationError({"detail": "Access denied. Candidate and HR users must log in at /login."})
 
         log_audit_event(
             actor=self.user,
@@ -2060,8 +2135,11 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
         request = self.context.get('request')
         candidate_profile = request.user.candidate_profile
 
-        if Application.objects.filter(candidate=candidate_profile, job=job).exists():
-            raise serializers.ValidationError({"non_field_errors": ["You have already applied for this position."]})
+        existing_app = Application.objects.filter(candidate=candidate_profile, job=job).first()
+        if existing_app:
+            attrs['existing_app'] = existing_app
+            attrs['job_obj'] = job
+            return attrs
 
         app_type = attrs.get('application_type') or job.application_type or 'PROFILE_RESUME'
         resume_id = attrs.get('resume_id')

@@ -1338,11 +1338,13 @@ class LocationSerializer(serializers.ModelSerializer):
 class CandidateUserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
-    location = LocationSerializer(source='candidate_profile.location', read_only=True)
+    location = serializers.SerializerMethodField()
     gender = serializers.CharField(source='candidate_profile.gender', read_only=True)
     date_of_birth = serializers.CharField(source='candidate_profile.dob', read_only=True)
-    profile_photo = serializers.CharField(source='candidate_profile.profile_photo', read_only=True)
-    profile_completion = serializers.IntegerField(source='candidate_profile.profile_completion', read_only=True)
+    profile_photo = serializers.SerializerMethodField()
+    profile_completion = serializers.SerializerMethodField()
+    applications = serializers.SerializerMethodField()
+    last_active = serializers.SerializerMethodField()
     expected_salary_min = serializers.DecimalField(source='candidate_profile.expected_salary_min', max_digits=12, decimal_places=2, read_only=True)
     expected_salary_max = serializers.DecimalField(source='candidate_profile.expected_salary_max', max_digits=12, decimal_places=2, read_only=True)
     preferred_job_type = serializers.CharField(source='candidate_profile.preferred_job_type', read_only=True)
@@ -1363,6 +1365,8 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             'date_of_birth',
             'profile_photo',
             'profile_completion',
+            'applications',
+            'last_active',
             'expected_salary_min',
             'expected_salary_max',
             'preferred_job_type',
@@ -1378,6 +1382,69 @@ class CandidateUserSerializer(serializers.ModelSerializer):
 
     def get_name(self, obj):
         return self.get_full_name(obj)
+
+    def get_profile_photo(self, obj):
+        request = self.context.get('request')
+        if obj.profile_picture:
+            try:
+                return request.build_absolute_uri(obj.profile_picture.url) if request else obj.profile_picture.url
+            except Exception:
+                pass
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile and obj.candidate_profile.profile_photo:
+            photo = obj.candidate_profile.profile_photo
+            if photo.startswith('http') or not request:
+                return photo
+            return request.build_absolute_uri(photo)
+        return None
+
+    def get_location(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            if cp.location:
+                return LocationSerializer(cp.location).data
+            state = cp.state or ''
+            city = cp.city or ''
+            district = getattr(cp, 'district', '') or ''
+            address = cp.address or ''
+            display_name = f"{city}, {state}".strip(', ') if (city or state) else (address if address else 'Tamil Nadu')
+            return {
+                'name': display_name,
+                'city': city,
+                'district': district,
+                'state': state or 'Tamil Nadu',
+                'full_path': display_name
+            }
+        return {'name': 'Tamil Nadu', 'state': 'Tamil Nadu', 'district': '', 'city': ''}
+
+    def get_profile_completion(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            if cp.profile_completion and cp.profile_completion > 0:
+                return cp.profile_completion
+            score = 20
+            if cp.full_name or obj.first_name:
+                score += 15
+            if obj.phone_number or cp.phone:
+                score += 15
+            if cp.city or cp.state or cp.location:
+                score += 15
+            if cp.degree or cp.college:
+                score += 15
+            if hasattr(cp, 'resumes') and cp.resumes.exists():
+                score += 20
+            return min(score, 100)
+        return 20
+
+    def get_applications(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            return Application.objects.filter(candidate=obj.candidate_profile).count()
+        return 0
+
+    def get_last_active(self, obj):
+        dt = obj.last_login or obj.updated_at or obj.created_at
+        if dt:
+            return dt.strftime("%b %d, %Y")
+        return "Active"
 
 
 class EmployerUserSerializer(serializers.ModelSerializer):
@@ -1761,12 +1828,18 @@ class JobReviewQueueSerializer(serializers.ModelSerializer):
 
 class NotificationSerializer(serializers.ModelSerializer):
     formatted_time = serializers.SerializerMethodField()
+    recipient_email = serializers.CharField(source='user.email', read_only=True)
+    recipient_name = serializers.SerializerMethodField()
+    recipient_role = serializers.CharField(source='user.role', read_only=True)
 
     class Meta:
         model = Notification
         fields = (
             'id',
             'user_id',
+            'recipient_email',
+            'recipient_name',
+            'recipient_role',
             'notification_type',
             'title',
             'message',
@@ -1777,6 +1850,11 @@ class NotificationSerializer(serializers.ModelSerializer):
             'formatted_time',
         )
         read_only_fields = ('id', 'user_id', 'created_at')
+
+    def get_recipient_name(self, obj):
+        if not obj.user:
+            return 'User'
+        return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
 
     def get_formatted_time(self, obj):
         if not obj.created_at:
@@ -1797,6 +1875,16 @@ class NotificationSerializer(serializers.ModelSerializer):
 
 
 class JobReportSerializer(serializers.ModelSerializer):
+    job_id = serializers.IntegerField(source='job.id', read_only=True)
+    job_title = serializers.CharField(source='job.title', read_only=True)
+    company_name = serializers.SerializerMethodField()
+    job_status = serializers.CharField(source='job.status', read_only=True)
+    job_locations = serializers.SerializerMethodField()
+    reported_by_name = serializers.SerializerMethodField()
+    reported_by_email = serializers.CharField(source='reported_by.email', read_only=True)
+    reviewed_by_name = serializers.SerializerMethodField()
+    reviewed_by_email = serializers.CharField(source='reviewed_by.email', read_only=True)
+    reason_display = serializers.CharField(source='reason', read_only=True)
     job_details = serializers.SerializerMethodField()
     reporter_details = serializers.SerializerMethodField()
     reviewer_details = serializers.SerializerMethodField()
@@ -1806,19 +1894,61 @@ class JobReportSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'job',
+            'job_id',
+            'job_title',
+            'company_name',
+            'job_status',
+            'job_locations',
             'job_details',
             'reported_by',
+            'reported_by_name',
+            'reported_by_email',
             'reporter_details',
             'reason',
+            'reason_display',
             'description',
             'status',
             'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_by_email',
             'reviewer_details',
             'reviewed_at',
             'notes',
             'created_at',
         )
         read_only_fields = ('id', 'reported_by', 'reviewed_by', 'reviewed_at', 'created_at')
+
+    def get_company_name(self, obj):
+        if obj.job and obj.job.hr:
+            return obj.job.hr.company_name or 'Unknown Company'
+        return 'Unknown Company'
+
+    def get_job_locations(self, obj):
+        if not obj.job:
+            return []
+        locs = []
+        for jl in obj.job.job_locations.select_related('location').all():
+            locs.append({
+                'id': jl.location.id,
+                'name': jl.location.name,
+                'full_path': jl.location.get_full_path(),
+                'state': jl.location.get_state(),
+                'district': jl.location.get_district(),
+                'formatted': jl.location.get_full_path(),
+            })
+        return locs
+
+    def get_reported_by_name(self, obj):
+        if not obj.reported_by:
+            return 'Candidate User'
+        u = obj.reported_by
+        return f"{u.first_name} {u.last_name}".strip() or u.username
+
+    def get_reviewed_by_name(self, obj):
+        if not obj.reviewed_by:
+            return None
+        u = obj.reviewed_by
+        return f"{u.first_name} {u.last_name}".strip() or u.username
 
     def get_job_details(self, obj):
         if not obj.job:
@@ -2131,6 +2261,12 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
 
         if job.status != Job.Status.PUBLISHED:
             raise serializers.ValidationError({"job_id": "This job is not active or accepting applications."})
+
+        if job.application_deadline and job.application_deadline < timezone.now().date():
+            if job.status != Job.Status.EXPIRED:
+                job.status = Job.Status.EXPIRED
+                job.save(update_fields=['status'])
+            raise serializers.ValidationError({"job_id": f"This job listing has expired as of {job.application_deadline} and is no longer accepting applications."})
 
         request = self.context.get('request')
         candidate_profile = request.user.candidate_profile

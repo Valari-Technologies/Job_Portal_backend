@@ -38,6 +38,9 @@ from .views import (
     NotificationMarkReadView,
     NotificationMarkAllReadView,
     NotificationUnreadCountView,
+    AdminBroadcastNotificationView,
+    NotificationDeleteView,
+    NotificationClearAllView,
     JobReportCreateView,
     JobReportAdminListView,
     JobReportDecisionView,
@@ -64,9 +67,11 @@ from .views import (
     RecruiterApplicationScheduleInterviewView,
     RecruiterApplicationSendMessageView,
     RecruiterJobListView,
+    AdminAnalyticsView,
 )
 
 urlpatterns = [
+    path('admin/analytics/', AdminAnalyticsView.as_view(), name='admin_analytics'),
     path('companies/public/', PublicCompanyListView.as_view(), name='public_company_list'),
     path(
         'register/candidate/',
@@ -269,6 +274,21 @@ urlpatterns = [
         'notifications/unread-count/',
         NotificationUnreadCountView.as_view(),
         name='notification_unread_count'
+    ),
+    path(
+        'admin/notifications/broadcast/',
+        AdminBroadcastNotificationView.as_view(),
+        name='admin_notifications_broadcast'
+    ),
+    path(
+        'notifications/<int:pk>/delete/',
+        NotificationDeleteView.as_view(),
+        name='notification_delete'
+    ),
+    path(
+        'notifications/clear-all/',
+        NotificationClearAllView.as_view(),
+        name='notification_clear_all'
     ),
 
     # Job Reports

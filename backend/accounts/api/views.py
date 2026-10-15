@@ -356,6 +356,12 @@ class PasswordResetRequestView(APIView):
                 except Exception:
                     pass
 
+                # Terminal log for local development convenience
+                print("\n==================================================")
+                print(f"[PASSWORD RESET EMAIL] Recipient: {user.email}")
+                print(f"[RESET LINK]: {reset_link}")
+                print("==================================================\n")
+
                 log_audit_event(
                     actor=user,
                     actor_email=user.email,
@@ -1284,8 +1290,10 @@ class JobCategoryAdminListView(generics.ListCreateAPIView):
         if parent_param:
             if parent_param.lower() == 'null' or parent_param == '0':
                 queryset = queryset.filter(parent__isnull=True)
+            elif parent_param.isdigit():
+                queryset = queryset.filter(parent_id=int(parent_param))
             else:
-                queryset = queryset.filter(parent_id=parent_param)
+                queryset = queryset.none()
 
         return queryset
 
@@ -1536,8 +1544,10 @@ class JobCategoryPublicListView(generics.ListAPIView):
         if parent_param:
             if parent_param.lower() == 'null' or parent_param == '0':
                 queryset = queryset.filter(parent__isnull=True)
+            elif parent_param.isdigit():
+                queryset = queryset.filter(parent_id=int(parent_param))
             else:
-                queryset = queryset.filter(parent_id=parent_param)
+                queryset = queryset.none()
         return queryset
 
 
@@ -2067,6 +2077,55 @@ class JobReportDecisionView(APIView):
 # CANDIDATE PORTAL API VIEWS
 # ==========================================
 
+def calculate_candidate_profile_completion(candidate_profile, user=None):
+    """
+    Calculate dynamic completion percentage (15% to 100%) based on candidate's real profile data.
+    """
+    if not candidate_profile:
+        return 0
+    user = user or candidate_profile.user
+    extra_data = candidate_profile.extra_data or {}
+
+    db_educations_count = Education.objects.filter(candidate=candidate_profile).count() or len(extra_data.get('education') or [])
+    db_experiences_count = Experience.objects.filter(candidate=candidate_profile).count() or len(extra_data.get('experiences') or [])
+    resumes_count = candidate_profile.resumes.count() if hasattr(candidate_profile, 'resumes') else 0
+    db_skills_count = candidate_profile.candidate_skills.count() if hasattr(candidate_profile, 'candidate_skills') else 0
+    if not db_skills_count:
+        db_skills_count = len(extra_data.get('programmingLanguages') or []) + len(extra_data.get('technologies') or [])
+
+    full_name = candidate_profile.full_name or (f"{user.first_name} {user.last_name}".strip() if user else '') or (user.username if user else '')
+    avatar_url = bool(user.profile_picture or candidate_profile.profile_photo)
+    headline_text = candidate_profile.degree or ''
+    location_text = candidate_profile.city or candidate_profile.state or ''
+    summary_text = candidate_profile.address or ''
+    phone_text = candidate_profile.phone or (user.phone_number if user else '')
+
+    score = 15
+    if full_name:
+        score += 10
+    if phone_text:
+        score += 10
+    if headline_text:
+        score += 10
+    if location_text:
+        score += 5
+    if summary_text:
+        score += 10
+    if avatar_url:
+        score += 10
+    if db_experiences_count > 0:
+        score += 15
+    if db_educations_count > 0:
+        score += 10
+    if db_skills_count > 0:
+        score += 10
+    if resumes_count > 0:
+        score += 5
+
+    completion_percentage = min(100, max(15, score))
+    return completion_percentage
+
+
 class CandidateProfileDetailView(APIView):
     """
     Fetch and update authenticated candidate's profile data with strict user isolation.
@@ -2142,28 +2201,10 @@ class CandidateProfileDetailView(APIView):
         summary_text = candidate_profile.address or ''
 
         # Dynamic completion percentage
-        score = 15
-        if full_name:
-            score += 10
-        if candidate_profile.phone or user.phone_number:
-            score += 10
-        if headline_text:
-            score += 10
-        if location_text:
-            score += 5
-        if summary_text:
-            score += 10
-        if avatar_url:
-            score += 10
-        if len(formatted_experiences) > 0:
-            score += 15
-        if len(formatted_education) > 0:
-            score += 10
-        if len(programming_languages) > 0 or len(technologies) > 0:
-            score += 10
-        if len(resumes) > 0:
-            score += 5
-        completion_percentage = min(100, max(15, score))
+        completion_percentage = calculate_candidate_profile_completion(candidate_profile, user)
+        if candidate_profile.profile_completion != completion_percentage:
+            candidate_profile.profile_completion = completion_percentage
+            candidate_profile.save(update_fields=['profile_completion'])
 
         missing_sections = []
         if not (candidate_profile.phone or user.phone_number):
@@ -2208,7 +2249,8 @@ class CandidateProfileDetailView(APIView):
             "expectedSalaryMin": str(candidate_profile.expected_salary_min) if candidate_profile.expected_salary_min else None,
             "expectedSalaryMax": str(candidate_profile.expected_salary_max) if candidate_profile.expected_salary_max else None,
             "preferredJobType": candidate_profile.preferred_job_type or 'Full-time',
-            "preferredWorkMode": candidate_profile.preferred_work_mode.name if candidate_profile.preferred_work_mode else 'Hybrid'
+            "preferredWorkMode": candidate_profile.preferred_work_mode.name if candidate_profile.preferred_work_mode else 'Hybrid',
+            "onboarding": extra_data.get('onboarding', {})
         }
 
         return Response(profile_data, status=status.HTTP_200_OK)
@@ -2324,6 +2366,25 @@ class CandidateProfileDetailView(APIView):
         # Update links in extra_data
         if 'links' in data:
             extra_data['links'] = data['links']
+
+        # Update onboarding taxonomy selections in extra_data
+        if 'onboarding' in data:
+            if not isinstance(extra_data.get('onboarding'), dict):
+                extra_data['onboarding'] = {}
+            if isinstance(data['onboarding'], dict):
+                extra_data['onboarding'].update(data['onboarding'])
+            else:
+                extra_data['onboarding'] = data['onboarding']
+
+        if 'industry' in data:
+            if not isinstance(extra_data.get('onboarding'), dict):
+                extra_data['onboarding'] = {}
+            extra_data['onboarding']['industry'] = data['industry']
+
+        if 'specializations' in data:
+            if not isinstance(extra_data.get('onboarding'), dict):
+                extra_data['onboarding'] = {}
+            extra_data['onboarding']['specializations'] = data['specializations']
 
         candidate_profile.extra_data = extra_data
 
@@ -2665,6 +2726,16 @@ class CandidateApplicationListView(generics.ListAPIView):
 
         candidate_profile = request.user.candidate_profile
 
+        # Candidate must have at least 70% profile completion to apply for jobs
+        completion_pct = calculate_candidate_profile_completion(candidate_profile, request.user)
+        if completion_pct < 70:
+            return Response({
+                "detail": f"Profile completion is currently {completion_pct}%. You must have at least 70% profile completion to apply for jobs. Please complete your profile first.",
+                "profile_completion": completion_pct,
+                "required_completion": 70,
+                "require_profile_completion": True
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Update candidate phone if provided
         if phone_num:
             request.user.phone_number = phone_num
@@ -2998,7 +3069,7 @@ class RecruiterApplicationListView(APIView):
                     try:
                         resume_url = request.build_absolute_uri(app.resume.file_path.url)
                     except Exception:
-                        resume_url = None
+                        resume_url = f"http://127.0.0.1:8000/media/{app.resume.file_path}"
             elif c_profile:
                 def_res = c_profile.resumes.filter(is_default=True).first() or c_profile.resumes.first()
                 if def_res:
@@ -3008,14 +3079,16 @@ class RecruiterApplicationListView(APIView):
                         try:
                             resume_url = request.build_absolute_uri(def_res.file_path.url)
                         except Exception:
-                            resume_url = None
+                            resume_url = f"http://127.0.0.1:8000/media/{def_res.file_path}"
 
-            # Skills
+            # Skills - strictly live skills from DB or candidate extra_data
             skill_names = [cs.skill.name for cs in c_profile.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill] if c_profile else []
-            if not skill_names:
-                skill_names = ['Python', 'JavaScript', 'React.js', 'Django REST Framework', 'PostgreSQL', 'Docker', 'Tailwind CSS', 'Git']
+            if c_profile and not skill_names:
+                c_extra = c_profile.extra_data or {}
+                extra_skills = (c_extra.get('programmingLanguages') or []) + (c_extra.get('technologies') or [])
+                skill_names = [s for s in extra_skills if s]
 
-            # Experiences
+            # Experiences - strictly live DB experiences or candidate extra_data
             experiences = []
             if c_profile:
                 for exp in c_profile.experiences.all().order_by('-start_date', '-id'):
@@ -3024,30 +3097,36 @@ class RecruiterApplicationListView(APIView):
                     period_str = f"{start_yr} - {end_yr}".strip(' -')
                     experiences.append({
                         "id": exp.id,
-                        "roleTitle": exp.designation or exp.job_title or "Software Developer",
-                        "companyName": exp.company or exp.company_name or "Tech Solutions",
-                        "period": period_str or "2022 - Present",
-                        "location": exp.experience_type or "Chennai, India",
+                        "roleTitle": exp.designation or exp.job_title or "",
+                        "companyName": exp.company or exp.company_name or "",
+                        "period": period_str or "",
+                        "location": exp.experience_type or "",
                         "description": exp.description or ""
                     })
+                if not experiences and 'experiences' in (c_profile.extra_data or {}):
+                    experiences = c_profile.extra_data.get('experiences') or []
 
-            # Education
+            # Education - strictly live DB educations or candidate extra_data
             educations = []
             if c_profile:
                 for edu in c_profile.educations.all().order_by('-graduation_year', '-id'):
                     educations.append({
                         "id": edu.id,
-                        "degree": edu.degree or "Degree",
-                        "institution": edu.institution or edu.college or "University",
-                        "year": edu.graduation_year or "2021"
+                        "degree": edu.degree or "",
+                        "institution": edu.institution or edu.college or "",
+                        "year": str(edu.graduation_year or "")
                     })
+                if not educations and 'education' in (c_profile.extra_data or {}):
+                    educations = c_profile.extra_data.get('education') or []
 
-            # Full Name & Headline
+            # Full Name, Headline, Location, Phone, Links strictly from live profile
             full_name = (c_profile.full_name if c_profile else None) or (f"{c_user.first_name} {c_user.last_name}".strip() if c_user else '') or (c_user.username if c_user else 'Candidate')
-            headline = (c_profile.degree if c_profile else None) or 'Senior Full-Stack Developer'
-            location_str = f"{c_profile.city}, {c_profile.state}".strip(', ') if c_profile and (c_profile.city or c_profile.state) else 'Chennai, Tamil Nadu'
-            phone_str = (c_profile.phone if c_profile else None) or (c_user.phone_number if c_user else '') or '6365865876'
-            email_str = c_user.email if c_user else 'candidate@example.com'
+            headline = (c_profile.degree if c_profile else '') or ''
+            location_str = f"{c_profile.city}, {c_profile.state}".strip(', ') if c_profile and (c_profile.city or c_profile.state) else ''
+            phone_str = (c_profile.phone if c_profile else None) or (c_user.phone_number if c_user else '') or ''
+            email_str = c_user.email if c_user else ''
+            cand_links = (c_profile.extra_data or {}).get('links', {}) if c_profile else {}
+            profile_comp_score = calculate_candidate_profile_completion(c_profile, c_user) if c_profile else 0
 
             results.append({
                 "id": str(app.id),
@@ -3063,23 +3142,24 @@ class RecruiterApplicationListView(APIView):
                 "job": {
                     "id": str(app.job.id),
                     "title": app.job.title,
-                    "company_name": app.job.hr.company_name if (app.job.hr and app.job.hr.company_name) else "MSD Tech",
-                    "location": f"{app.job.location.name}" if getattr(app.job, 'location', None) else "Tambaram, Chennai, Tamil Nadu",
-                    "work_mode": app.job.work_mode or "On-site"
+                    "company_name": app.job.hr.company_name if (app.job.hr and app.job.hr.company_name) else "Company",
+                    "location": f"{app.job.location.name}" if getattr(app.job, 'location', None) and app.job.location else "Tambaram, Chennai, Tamil Nadu",
+                    "work_mode": app.job.work_mode.name if app.job.work_mode else "On-site"
                 },
                 "candidate": {
                     "id": c_profile.id if c_profile else app.id,
-                    "full_name": full_name,
-                    "headline": headline,
+                    "full_name": full_name or "Candidate",
+                    "headline": headline or "",
                     "email": email_str,
                     "phone": phone_str,
                     "location": location_str,
                     "profile_photo": avatar_url,
-                    "profile_completion": c_profile.profile_completion if c_profile and c_profile.profile_completion else 95,
-                    "initials": full_name.charAt(0).upper() if hasattr(full_name, 'charAt') else full_name[0].upper(),
+                    "profile_completion": profile_comp_score,
+                    "initials": full_name[:1].upper() if full_name else "C",
                     "skills": skill_names,
                     "experiences": experiences,
-                    "education": educations
+                    "education": educations,
+                    "links": cand_links
                 }
             })
 
@@ -3546,7 +3626,8 @@ class AdminAnalyticsView(APIView):
         state_param = request.query_params.get('state', 'all').lower()
 
         now = timezone.now()
-        days = int(range_param) if range_param.isdigit() else 30
+        clean_range = ''.join(c for c in str(range_param) if c.isdigit())
+        days = int(clean_range) if clean_range else 30
         window_start = now - timedelta(days=days)
         prev_window_start = now - timedelta(days=2 * days)
 
@@ -3706,6 +3787,11 @@ class AdminAnalyticsView(APIView):
             elif cand.city and cand.city in district_map:
                 district_map[cand.city]["candidates"] += 1
 
+        for item in district_map.values():
+            j_cnt = item["jobs"]
+            item["count"] = j_cnt
+            item["share"] = f"{round((j_cnt / live_jobs_count * 100), 1)}%" if live_jobs_count > 0 else "0%"
+
         districts = sorted(
             list(district_map.values()),
             key=lambda d: (d["jobs"] + d["candidates"] + d["employers"] + d["applications"]),
@@ -3775,15 +3861,20 @@ class AdminAnalyticsView(APIView):
         }
 
         # 8. Time-series Trends (Live cumulative timeline up to selected date range for ACTIVE jobs)
-        num_buckets = 7 if range_param == '7' else (3 if range_param == '90' else 4)
-        bucket_days = 1 if range_param == '7' else (30 if range_param == '90' else 7)
+        num_buckets = 7 if days <= 7 else (3 if days >= 90 else 4)
+        bucket_days = 1 if days <= 7 else (30 if days >= 90 else 7)
         trends = []
         for i in range(num_buckets):
             b_end = now - timedelta(days=(num_buckets - i - 1) * bucket_days)
             b_apps = Application.objects.filter(applied_at__lte=b_end).count()
             b_cands = CandidateProfile.objects.filter(created_at__lte=b_end).count()
             b_jobs = active_jobs_qs.filter(created_at__lte=b_end).count()
-            label = b_end.strftime("%a") if range_param == '7' else f"Week {i+1}"
+            if days <= 7:
+                label = b_end.strftime("%a")
+            elif days >= 90:
+                label = b_end.strftime("%b")
+            else:
+                label = f"Week {i+1}"
             trends.append({
                 "date": label,
                 "applications": b_apps,
@@ -3791,11 +3882,141 @@ class AdminAnalyticsView(APIView):
                 "jobs": b_jobs
             })
 
+        # 9. Action Required Queues (100% Live DB Queries)
+        pending_employers_qs = HRProfile.objects.filter(verification_status='PENDING').select_related('user', 'location')
+        pending_employers_count = pending_employers_qs.count()
+        verifications_list = []
+        for emp in pending_employers_qs[:10]:
+            loc_str = emp.location.name if emp.location else "Tamil Nadu"
+            c_name = emp.company_name or (emp.user.get_full_name() if emp.user else "Company")
+            emp_date = emp.created_at.strftime("%b %d, %Y") if hasattr(emp, 'created_at') and emp.created_at else "Recent"
+            verifications_list.append({
+                "id": emp.id,
+                "title": c_name,
+                "subtitle": f"Location: {loc_str}",
+                "badge": "PENDING_VERIFICATION",
+                "date": emp_date,
+                "details": {
+                    "id": emp.id,
+                    "company_name": c_name,
+                    "location": loc_str,
+                    "contact_email": emp.user.email if emp.user else "",
+                    "status": "PENDING"
+                }
+            })
+
+        pending_jobs_qs = Job.objects.filter(status='PENDING_REVIEW').select_related('hr')
+        pending_jobs_count = pending_jobs_qs.count()
+        pending_jobs_list = []
+        for job in pending_jobs_qs[:10]:
+            comp_name = job.hr.company_name if job.hr else "Company"
+            sal_str = f"₹{int(job.salary_min):,} - ₹{int(job.salary_max):,}" if (job.salary_min and job.salary_max) else "Competitive"
+            pending_jobs_list.append({
+                "id": job.id,
+                "title": job.title,
+                "subtitle": f"Employer: {comp_name} • Salary: {sal_str}",
+                "badge": "PENDING_REVIEW",
+                "date": job.created_at.strftime("%b %d, %Y") if job.created_at else "Recent",
+                "details": {
+                    "id": job.id,
+                    "title": job.title,
+                    "company_name": comp_name,
+                    "status": "PENDING_REVIEW"
+                }
+            })
+
+        reported_jobs_qs = JobReport.objects.filter(status='PENDING').select_related('job', 'job__hr')
+        reported_jobs_count = reported_jobs_qs.count()
+        reported_jobs_list = []
+        for rep in reported_jobs_qs[:10]:
+            j_title = rep.job.title if rep.job else "Unknown Job"
+            comp_name = rep.job.hr.company_name if (rep.job and rep.job.hr) else "N/A"
+            reported_jobs_list.append({
+                "id": rep.id,
+                "title": f"Reported: {j_title}",
+                "subtitle": f"Reason: {rep.reason} • Employer: {comp_name}",
+                "badge": "REPORTED",
+                "date": rep.created_at.strftime("%b %d, %Y") if rep.created_at else "Recent",
+                "details": {
+                    "id": rep.id,
+                    "job_title": j_title,
+                    "company_name": comp_name,
+                    "reason": rep.reason,
+                    "status": "PENDING"
+                }
+            })
+
+        low_qual_cands_qs = CandidateProfile.objects.filter(profile_completion__lt=60).select_related('user')
+        low_qual_cands_count = low_qual_cands_qs.count()
+        low_qual_list = []
+        for cand in low_qual_cands_qs[:10]:
+            c_name = cand.user.get_full_name() or cand.user.username if cand.user else "Candidate"
+            low_qual_list.append({
+                "id": cand.id,
+                "title": c_name,
+                "subtitle": f"Profile completion: {cand.profile_completion}% • City: {cand.city or 'N/A'}",
+                "badge": "LOW_QUALITY",
+                "date": cand.created_at.strftime("%b %d, %Y") if hasattr(cand, 'created_at') and cand.created_at else "Recent",
+                "details": {
+                    "id": cand.id,
+                    "name": c_name,
+                    "profile_completion": cand.profile_completion
+                }
+            })
+
+        action_queues = {
+            "employerVerifications": {
+                "count": pending_employers_count,
+                "list": verifications_list
+            },
+            "jobsPendingReview": {
+                "count": pending_jobs_count,
+                "list": pending_jobs_list
+            },
+            "reportedJobs": {
+                "count": reported_jobs_count,
+                "list": reported_jobs_list
+            },
+            "lowQualityProfiles": {
+                "count": low_qual_cands_count,
+                "list": low_qual_list
+            }
+        }
+
+        # 10. Job Activity Status Breakdown (100% Live)
+        draft_jobs_count = Job.objects.filter(status='DRAFT').count()
+        closed_jobs_count = Job.objects.filter(status__in=['CLOSED', 'EXPIRED', 'REJECTED']).count()
+        job_activity_breakdown = {
+            "live": live_jobs_count,
+            "pendingReview": pending_jobs_count,
+            "draft": draft_jobs_count,
+            "closed": closed_jobs_count,
+            "total": total_jobs_count
+        }
+
+        # 11. Recent Audit Activity Stream (100% Live)
+        recent_activities = []
+        for evt in AuditEvent.objects.order_by('-timestamp')[:8]:
+            recent_activities.append({
+                "id": str(evt.id),
+                "type": evt.action,
+                "message": evt.description or f"{evt.action} performed",
+                "time": evt.timestamp.strftime("%b %d, %I:%M %p") if evt.timestamp else "Recently",
+                "details": {
+                    "actor": evt.actor_email or "System",
+                    "target": evt.target_repr or evt.target_type or "",
+                    "outcome": evt.outcome
+                }
+            })
+
         return Response({
             "status": "success",
             "range": range_param,
             "state": state_param,
             "metrics": metrics,
+            "queues": action_queues,
+            "job_activity": job_activity_breakdown,
+            "recent_activities": recent_activities,
             "dual_pipelines": dual_pipelines,
             "funnel": funnel,
             "overall_conversion": f"{conversion_rate}%",

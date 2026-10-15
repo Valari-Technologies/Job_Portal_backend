@@ -102,6 +102,9 @@ class JobCategorySerializer(serializers.ModelSerializer):
             parent_text = f"under category '{parent.name}'" if parent else "as a top-level category"
             raise serializers.ValidationError({'name': f"A category named '{name}' already exists {parent_text}."})
 
+        if parent and parent.parent is not None:
+            raise serializers.ValidationError({'parent': f"'{parent.name}' is already a subcategory. Subcategories cannot have nested subcategories. Please choose a top-level parent category."})
+
         if self.instance and parent:
             if parent.pk == self.instance.pk:
                 raise serializers.ValidationError({'parent': "A category cannot be its own parent."})

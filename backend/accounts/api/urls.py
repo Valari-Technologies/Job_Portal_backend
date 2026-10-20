@@ -66,7 +66,9 @@ from .views import (
     RecruiterApplicationStatusUpdateView,
     RecruiterApplicationScheduleInterviewView,
     RecruiterApplicationSendMessageView,
+    RecruiterInterviewListView,
     RecruiterJobListView,
+    RecruiterDashboardView,
     AdminAnalyticsView,
 )
 
@@ -333,5 +335,7 @@ urlpatterns = [
     path('recruiter/applications/<int:pk>/status/', RecruiterApplicationStatusUpdateView.as_view(), name='recruiter_application_status_update'),
     path('recruiter/applications/<int:pk>/interview/', RecruiterApplicationScheduleInterviewView.as_view(), name='recruiter_application_schedule_interview'),
     path('recruiter/applications/<int:pk>/message/', RecruiterApplicationSendMessageView.as_view(), name='recruiter_application_send_message'),
+    path('recruiter/interviews/', RecruiterInterviewListView.as_view(), name='recruiter_interviews_list'),
     path('recruiter/jobs/', RecruiterJobListView.as_view(), name='recruiter_jobs_list_create'),
+    path('recruiter/dashboard/', RecruiterDashboardView.as_view(), name='recruiter_dashboard'),
 ]

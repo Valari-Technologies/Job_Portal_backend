@@ -2605,15 +2605,23 @@ class CandidateJobListView(generics.ListAPIView):
 
 class CandidateJobDetailView(generics.RetrieveAPIView):
     """
-    Public & Candidate job detail view. Strictly published jobs for candidates.
+    Public & Candidate job detail view. Strictly published jobs for candidates,
+    or any job the candidate has already applied to.
     """
     serializer_class = CandidateJobSerializer
     permission_classes = (permissions.AllowAny,)
 
     def get_queryset(self):
         user = self.request.user
-        if user and user.is_authenticated and getattr(user, 'role', '') in ['HR', 'ADMIN', 'MODERATOR']:
-            return Job.objects.all()
+        if user and user.is_authenticated:
+            if getattr(user, 'role', '') in ['HR', 'ADMIN', 'MODERATOR']:
+                return Job.objects.all()
+            if hasattr(user, 'candidate_profile'):
+                applied_job_ids = list(Application.objects.filter(candidate=user.candidate_profile).values_list('job_id', flat=True))
+                return Job.objects.filter(
+                    Q(status=Job.Status.PUBLISHED, hr__user__is_active=True) |
+                    Q(id__in=applied_job_ids)
+                ).distinct()
         return Job.objects.filter(status=Job.Status.PUBLISHED, hr__user__is_active=True)
 
 
@@ -3315,6 +3323,58 @@ class RecruiterApplicationScheduleInterviewView(APIView):
             "interview_id": interview.id,
             "status": "INTERVIEW"
         }, status=status.HTTP_201_CREATED)
+
+
+class RecruiterInterviewListView(APIView):
+    """
+    List interviews for jobs managed by the authenticated recruiter/HR.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        if user.role != 'HR' or not hasattr(user, 'hr_profile') or not user.hr_profile:
+            return Response([], status=status.HTTP_200_OK)
+
+        interviews = Interview.objects.filter(job__hr=user.hr_profile).select_related(
+            'application', 'application__candidate', 'application__candidate__user', 'job'
+        ).order_by('-scheduled_date', '-scheduled_time')
+
+        results = []
+        for inv in interviews:
+            cand = inv.application.candidate if inv.application else None
+            cand_user = cand.user if cand else None
+            cand_name = cand_user.get_full_name() or cand_user.first_name or cand_user.username if cand_user else "Candidate"
+            results.append({
+                "id": str(inv.id),
+                "application_id": str(inv.application_id),
+                "candidate": {
+                    "id": str(cand.id) if cand else "",
+                    "full_name": cand_name,
+                    "email": cand_user.email if cand_user else "",
+                    "phone": cand.phone if cand else ""
+                },
+                "candidateName": cand_name,
+                "job": {
+                    "id": str(inv.job_id),
+                    "title": inv.job.title if inv.job else "Position"
+                },
+                "jobTitle": inv.job.title if inv.job else "Position",
+                "scheduled_by": {
+                    "full_name": inv.scheduled_by.get_full_name() or inv.scheduled_by.username if inv.scheduled_by else "You"
+                },
+                "interview_type": inv.interview_type,
+                "scheduled_date": inv.scheduled_date.isoformat() if inv.scheduled_date else "",
+                "scheduled_time": inv.scheduled_time.strftime("%I:%M %p") if inv.scheduled_time else "10:00 AM",
+                "location": inv.location or "",
+                "meeting_link": inv.meeting_link or "",
+                "phone_number": inv.phone_number or "",
+                "notes": inv.notes or "",
+                "status": inv.status,
+                "result": inv.result,
+                "created_at": inv.created_at.isoformat() if inv.created_at else ""
+            })
+        return Response(results, status=status.HTTP_200_OK)
 
 
 class RecruiterApplicationSendMessageView(APIView):
@@ -4026,5 +4086,93 @@ class AdminAnalyticsView(APIView):
             "employer_trust": employer_trust_stats,
             "trends": trends
         }, status=status.HTTP_200_OK)
+
+
+class RecruiterDashboardView(APIView):
+    """
+    Live aggregated dashboard metrics, recent applications, and interviews
+    for the authenticated Recruiter/HR.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        hr_profile = getattr(user, 'hr_profile', None)
+
+        if user.role == 'HR' and hr_profile:
+            jobs_qs = Job.objects.filter(hr=hr_profile)
+            apps_qs = Application.objects.filter(job__hr=hr_profile)
+            interviews_qs = Interview.objects.filter(job__hr=hr_profile)
+            company_name = hr_profile.company_name or "My Company"
+        elif user.is_superuser or user.role == 'ADMIN':
+            jobs_qs = Job.objects.all()
+            apps_qs = Application.objects.all()
+            interviews_qs = Interview.objects.all()
+            company_name = "State Jobz Portal"
+        else:
+            jobs_qs = Job.objects.none()
+            apps_qs = Application.objects.none()
+            interviews_qs = Interview.objects.none()
+            company_name = "My Company"
+
+        active_jobs_count = jobs_qs.filter(status=Job.Status.PUBLISHED).count()
+        total_apps_count = apps_qs.count()
+        shortlisted_count = apps_qs.filter(status='SHORTLISTED').count()
+        pending_count = apps_qs.filter(status__in=['APPLIED', 'UNDER_REVIEW']).count()
+        interviews_count = interviews_qs.count()
+        hired_count = apps_qs.filter(status='SELECTED').count()
+        job_credits = getattr(hr_profile, 'job_posting_credits', 10) if hr_profile else 10
+
+        # Recent applications (last 5)
+        recent_apps_list = []
+        for app in apps_qs.select_related('candidate', 'candidate__user', 'job').order_by('-applied_at')[:5]:
+            cand = app.candidate
+            full_name = cand.full_name if cand else "Candidate"
+            initials = full_name[:1].upper() if full_name else "C"
+            recent_apps_list.append({
+                "id": str(app.id),
+                "candidate_name": full_name,
+                "candidate_initials": initials,
+                "job_title": app.job.title if app.job else "Role",
+                "status": app.status,
+                "applied_at": app.applied_at.isoformat() if app.applied_at else None
+            })
+
+        # Interviews Today / Upcoming (within today/next 24h)
+        today = timezone.localdate()
+        interviews_today_qs = interviews_qs.filter(
+            scheduled_date=today
+        ).select_related('application', 'application__candidate', 'job').order_by('scheduled_time')[:5]
+
+        interviews_today_list = []
+        for inv in interviews_today_qs:
+            cand = inv.application.candidate if inv.application else None
+            interviews_today_list.append({
+                "id": str(inv.id),
+                "candidate_name": cand.full_name if cand else "Candidate",
+                "job_title": inv.job.title if inv.job else "Role",
+                "time": inv.scheduled_time.strftime("%I:%M %p") if inv.scheduled_time else "10:00 AM",
+                "type": inv.get_interview_type_display() if hasattr(inv, 'get_interview_type_display') else inv.interview_type,
+                "status": inv.status
+            })
+
+        return Response({
+            "company": {
+                "company_name": company_name,
+            },
+            "wallet_balance": 0.00,
+            "metrics": {
+                "active_jobs": active_jobs_count,
+                "total_applications": total_apps_count,
+                "shortlisted": shortlisted_count,
+                "pending": pending_count,
+                "interviews": interviews_count,
+                "hired": hired_count,
+                "job_credits": job_credits
+            },
+            "recent_applications": recent_apps_list,
+            "interviews_today": interviews_today_list
+        }, status=status.HTTP_200_OK)
+
 
 

@@ -2198,6 +2198,8 @@ class CandidateProfileDetailView(APIView):
 
         headline_text = candidate_profile.degree or ''
         location_text = candidate_profile.city or candidate_profile.state or ''
+        if candidate_profile.city and candidate_profile.state and candidate_profile.city.strip().lower() != candidate_profile.state.strip().lower():
+            location_text = f"{candidate_profile.city}, {candidate_profile.state}"
         summary_text = candidate_profile.address or ''
 
         # Dynamic completion percentage
@@ -2232,6 +2234,8 @@ class CandidateProfileDetailView(APIView):
             "phone": candidate_profile.phone or user.phone_number or '',
             "headline": headline_text,
             "location": location_text,
+            "state": candidate_profile.state or (extra_data.get('state') if isinstance(extra_data, dict) else '') or '',
+            "district": candidate_profile.city or (extra_data.get('district') if isinstance(extra_data, dict) else '') or '',
             "summary": summary_text,
             "avatarUrl": avatar_url,
             "completionPercentage": completion_percentage,
@@ -2274,7 +2278,15 @@ class CandidateProfileDetailView(APIView):
         if 'headline' in data:
             candidate_profile.degree = data['headline']
 
-        if 'location' in data:
+        if 'state' in data:
+            candidate_profile.state = data['state']
+            extra_data['state'] = data['state']
+
+        if 'district' in data:
+            candidate_profile.city = data['district']
+            extra_data['district'] = data['district']
+
+        if 'location' in data and not ('district' in data or 'state' in data):
             candidate_profile.city = data['location']
 
         if 'summary' in data:

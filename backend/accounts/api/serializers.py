@@ -2021,6 +2021,7 @@ class CandidateJobSerializer(serializers.ModelSerializer):
     skills = serializers.SerializerMethodField()
     is_saved = serializers.SerializerMethodField()
     is_applied = serializers.SerializerMethodField()
+    is_expired = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
@@ -2050,6 +2051,7 @@ class CandidateJobSerializer(serializers.ModelSerializer):
             'responsibilities',
             'is_saved',
             'is_applied',
+            'is_expired',
             'published_at',
             'created_at',
         )
@@ -2122,6 +2124,13 @@ class CandidateJobSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user and request.user.is_authenticated and hasattr(request.user, 'candidate_profile'):
             return Application.objects.filter(candidate=request.user.candidate_profile, job=obj).exists()
+        return False
+
+    def get_is_expired(self, obj):
+        if obj.status == Job.Status.EXPIRED:
+            return True
+        if obj.application_deadline and obj.application_deadline < timezone.now().date():
+            return True
         return False
 
 
@@ -2280,7 +2289,12 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
             attrs['job_obj'] = job
             return attrs
 
-        app_type = attrs.get('application_type') or job.application_type or 'PROFILE_RESUME'
+        raw_app_type = str(attrs.get('application_type') or job.application_type or 'PROFILE_RESUME').upper()
+        if 'SIMPLE' in raw_app_type or 'LOCAL' in raw_app_type:
+            app_type = 'SIMPLE_LOCAL'
+        else:
+            app_type = 'PROFILE_RESUME'
+        attrs['application_type'] = app_type
         resume_id = attrs.get('resume_id')
 
         if app_type == 'PROFILE_RESUME':

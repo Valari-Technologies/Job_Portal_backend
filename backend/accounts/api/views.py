@@ -1062,6 +1062,13 @@ class JobReviewQueueView(generics.ListAPIView):
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
+        today = timezone.now().date()
+        Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            application_deadline__isnull=False,
+            application_deadline__lt=today
+        ).update(status=Job.Status.EXPIRED)
+
         queryset = Job.objects.select_related(
             'hr', 'hr__user', 'hr__trust', 'category', 'category__parent', 'work_mode'
         ).prefetch_related(
@@ -2542,9 +2549,19 @@ class CandidateJobListView(generics.ListAPIView):
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
+        today = timezone.now().date()
+        # Auto-expire any published jobs whose application deadline has passed
+        Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            application_deadline__isnull=False,
+            application_deadline__lt=today
+        ).update(status=Job.Status.EXPIRED)
+
         queryset = Job.objects.filter(
             status=Job.Status.PUBLISHED,
             hr__user__is_active=True
+        ).filter(
+            Q(application_deadline__isnull=True) | Q(application_deadline__gte=today)
         ).select_related(
             'hr', 'category', 'work_mode'
         ).prefetch_related(
@@ -2557,6 +2574,8 @@ class CandidateJobListView(generics.ListAPIView):
             rec_job_ids = list(JobRecommendation.objects.filter(
                 candidate=user.candidate_profile,
                 job__status=Job.Status.PUBLISHED
+            ).filter(
+                Q(job__application_deadline__isnull=True) | Q(job__application_deadline__gte=today)
             ).order_by('-score').values_list('job_id', flat=True))
             if rec_job_ids:
                 # Ordering by recommendation priority
@@ -2605,9 +2624,12 @@ class CandidateJobListView(generics.ListAPIView):
         user = request.user
         has_recommendations = False
         if user and user.is_authenticated and hasattr(user, 'candidate_profile'):
+            today = timezone.now().date()
             has_recommendations = JobRecommendation.objects.filter(
                 candidate=user.candidate_profile,
                 job__status=Job.Status.PUBLISHED
+            ).filter(
+                Q(job__application_deadline__isnull=True) | Q(job__application_deadline__gte=today)
             ).exists()
         
         if isinstance(response.data, dict):
@@ -2617,13 +2639,20 @@ class CandidateJobListView(generics.ListAPIView):
 
 class CandidateJobDetailView(generics.RetrieveAPIView):
     """
-    Public & Candidate job detail view. Strictly published jobs for candidates,
+    Public & Candidate job detail view. Strictly published or expired jobs for candidates,
     or any job the candidate has already applied to.
     """
     serializer_class = CandidateJobSerializer
     permission_classes = (permissions.AllowAny,)
 
     def get_queryset(self):
+        today = timezone.now().date()
+        Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            application_deadline__isnull=False,
+            application_deadline__lt=today
+        ).update(status=Job.Status.EXPIRED)
+
         user = self.request.user
         if user and user.is_authenticated:
             if getattr(user, 'role', '') in ['HR', 'ADMIN', 'MODERATOR']:
@@ -2632,9 +2661,13 @@ class CandidateJobDetailView(generics.RetrieveAPIView):
                 applied_job_ids = list(Application.objects.filter(candidate=user.candidate_profile).values_list('job_id', flat=True))
                 return Job.objects.filter(
                     Q(status=Job.Status.PUBLISHED, hr__user__is_active=True) |
-                    Q(id__in=applied_job_ids)
+                    Q(id__in=applied_job_ids) |
+                    Q(status=Job.Status.EXPIRED)
                 ).distinct()
-        return Job.objects.filter(status=Job.Status.PUBLISHED, hr__user__is_active=True)
+        return Job.objects.filter(
+            Q(status=Job.Status.PUBLISHED, hr__user__is_active=True) |
+            Q(status=Job.Status.EXPIRED)
+        )
 
 
 class CandidateToggleSavedJobView(APIView):
@@ -2746,15 +2779,8 @@ class CandidateApplicationListView(generics.ListAPIView):
 
         candidate_profile = request.user.candidate_profile
 
-        # Candidate must have at least 70% profile completion to apply for jobs
-        completion_pct = calculate_candidate_profile_completion(candidate_profile, request.user)
-        if completion_pct < 70:
-            return Response({
-                "detail": f"Profile completion is currently {completion_pct}%. You must have at least 70% profile completion to apply for jobs. Please complete your profile first.",
-                "profile_completion": completion_pct,
-                "required_completion": 70,
-                "require_profile_completion": True
-            }, status=status.HTTP_400_BAD_REQUEST)
+        # Candidate profile completion is optional per PRD Section 7, 9, 23 & 24.
+        # Professional jobs require a resume; Simple Local jobs require basic contact/phone.
 
         # Update candidate phone if provided
         if phone_num:
@@ -2986,8 +3012,25 @@ class CandidateDashboardView(APIView):
         ).order_by('scheduled_date', 'scheduled_time')[:3]
         upcoming_interviews = CandidateInterviewSerializer(upcoming_interviews_qs, many=True).data
 
-        # Recommended Jobs (Matching published jobs or JobRecommendation)
-        recommended_jobs_qs = Job.objects.filter(status=Job.Status.PUBLISHED).order_by('-published_at')[:6]
+        # Recommended Jobs (Strictly active, published, unexpired jobs that candidate has NOT already applied to)
+        today = timezone.now().date()
+        Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            application_deadline__isnull=False,
+            application_deadline__lt=today
+        ).update(status=Job.Status.EXPIRED)
+
+        applied_job_ids = list(Application.objects.filter(candidate=candidate_profile).values_list('job_id', flat=True))
+
+        recommended_jobs_qs = Job.objects.filter(
+            status=Job.Status.PUBLISHED,
+            hr__user__is_active=True
+        ).filter(
+            Q(application_deadline__isnull=True) | Q(application_deadline__gte=today)
+        ).exclude(
+            id__in=applied_job_ids
+        ).select_related('hr', 'category', 'work_mode').prefetch_related('job_locations', 'job_skills').order_by('-published_at')[:6]
+
         recommended_jobs = CandidateJobSerializer(recommended_jobs_qs, many=True, context={'request': request}).data
 
         # Unread notifications
@@ -3441,6 +3484,14 @@ class RecruiterJobListView(APIView):
         if user.role != 'HR' or not hasattr(user, 'hr_profile') or not user.hr_profile:
             return Response([], status=status.HTTP_200_OK)
 
+        today = timezone.now().date()
+        Job.objects.filter(
+            hr=user.hr_profile,
+            status=Job.Status.PUBLISHED,
+            application_deadline__isnull=False,
+            application_deadline__lt=today
+        ).update(status=Job.Status.EXPIRED)
+
         jobs = Job.objects.filter(hr=user.hr_profile).select_related(
             'category', 'work_mode', 'hr', 'department'
         ).prefetch_related(
@@ -3528,10 +3579,10 @@ class RecruiterJobListView(APIView):
             if not emp_type_obj:
                 emp_type_obj = EmploymentType.objects.create(name=emp_type_str, is_active=True)
 
-        # 5. Application Type (ERD enum: PROFILE_RESUME, SIMPLE_APPLY)
-        app_type_raw = str(data.get('applicationType') or '').upper()
-        if 'SIMPLE' in app_type_raw or 'QUICK' in app_type_raw:
-            app_type_val = 'SIMPLE_APPLY'
+        # 5. Application Type (ERD enum: PROFILE_RESUME, SIMPLE_LOCAL)
+        app_type_raw = str(data.get('applicationType') or data.get('application_type') or '').upper()
+        if 'SIMPLE' in app_type_raw or 'QUICK' in app_type_raw or 'LOCAL' in app_type_raw:
+            app_type_val = 'SIMPLE_LOCAL'
         else:
             app_type_val = 'PROFILE_RESUME'
 

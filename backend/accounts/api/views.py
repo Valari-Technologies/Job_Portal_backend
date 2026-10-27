@@ -222,6 +222,73 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+class ChangePasswordView(APIView):
+    """
+    API endpoint for authenticated users (Candidate, HR, Admin) to change their password.
+    Validates current password, checks new password requirements, and applies set_password.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        user = request.user
+        current_password = request.data.get('current_password') or request.data.get('currentPassword')
+        new_password = request.data.get('new_password') or request.data.get('newPassword')
+        confirm_new_password = request.data.get('confirm_new_password') or request.data.get('confirmNewPassword')
+
+        if not current_password:
+            return Response({"detail": "Please enter your current password."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not user.check_password(current_password):
+            return Response({"detail": "Incorrect current password. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not new_password or len(str(new_password).strip()) < 8:
+            return Response({"detail": "New password must be at least 8 characters long."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if new_password != confirm_new_password:
+            return Response({"detail": "New password and confirmation do not match."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if user.check_password(new_password):
+            return Response({"detail": "New password cannot be the same as your current password."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        return Response({
+            "success": True,
+            "message": "Password updated successfully! Please use your new password next time you sign in."
+        }, status=status.HTTP_200_OK)
+
+
+class AccountDeleteView(APIView):
+    """
+    API endpoint to delete/deactivate user account after verifying password and confirmation.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def post(self, request):
+        user = request.user
+        password = request.data.get('password')
+        confirmation_text = (request.data.get('confirmation_text') or request.data.get('confirmationText') or '').strip()
+
+        if not password:
+            return Response({"detail": "Please enter your password to confirm account deletion."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not user.check_password(password):
+            return Response({"detail": "Incorrect password. Cannot delete account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if confirmation_text != 'DELETE':
+            return Response({"detail": "Please type DELETE to confirm."}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.status = User.Status.DELETED
+        user.is_active = False
+        user.save()
+
+        return Response({
+            "success": True,
+            "message": "Your account has been deleted successfully."
+        }, status=status.HTTP_200_OK)
+
+
 class CurrentUserMeView(APIView):
     """
     API endpoint to retrieve safe identity payload for current authenticated user.
@@ -2261,7 +2328,8 @@ class CandidateProfileDetailView(APIView):
             "expectedSalaryMax": str(candidate_profile.expected_salary_max) if candidate_profile.expected_salary_max else None,
             "preferredJobType": candidate_profile.preferred_job_type or 'Full-time',
             "preferredWorkMode": candidate_profile.preferred_work_mode.name if candidate_profile.preferred_work_mode else 'Hybrid',
-            "onboarding": extra_data.get('onboarding', {})
+            "onboarding": extra_data.get('onboarding', {}),
+            "settings": extra_data.get('settings', {})
         }
 
         return Response(profile_data, status=status.HTTP_200_OK)
@@ -2404,6 +2472,17 @@ class CandidateProfileDetailView(APIView):
             if not isinstance(extra_data.get('onboarding'), dict):
                 extra_data['onboarding'] = {}
             extra_data['onboarding']['specializations'] = data['specializations']
+
+        # Update candidate settings/preferences (quietHours, notifications, etc.)
+        if 'settings' in data and isinstance(data['settings'], dict):
+            if not isinstance(extra_data.get('settings'), dict):
+                extra_data['settings'] = {}
+            extra_data['settings'].update(data['settings'])
+
+        if 'quietHours' in data and isinstance(data['quietHours'], dict):
+            if not isinstance(extra_data.get('settings'), dict):
+                extra_data['settings'] = {}
+            extra_data['settings']['quietHours'] = data['quietHours']
 
         candidate_profile.extra_data = extra_data
 
@@ -2594,10 +2673,46 @@ class CandidateJobListView(generics.ListAPIView):
                 Q(hr__company_name__icontains=search_query)
             )
 
-        # Filter category / industry
-        category_param = self.request.query_params.get('category', '').strip() or self.request.query_params.get('industry', '').strip()
-        if category_param:
-            queryset = queryset.filter(Q(category_id=category_param) | Q(category__name__icontains=category_param))
+        # Filter industry (Top-level category or parent of child category)
+        industry_param = self.request.query_params.get('industry', '').strip() or self.request.query_params.get('industryId', '').strip()
+        if industry_param:
+            if industry_param.isdigit():
+                queryset = queryset.filter(
+                    Q(category_id=int(industry_param)) |
+                    Q(category__parent_id=int(industry_param))
+                )
+            else:
+                queryset = queryset.filter(
+                    Q(category__name__iexact=industry_param) |
+                    Q(category__parent__name__iexact=industry_param) |
+                    Q(category__name__icontains=industry_param) |
+                    Q(category__parent__name__icontains=industry_param)
+                )
+
+        # Filter department (Specific child category)
+        department_param = self.request.query_params.get('department', '').strip() or self.request.query_params.get('departmentId', '').strip()
+        if department_param:
+            if department_param.isdigit():
+                queryset = queryset.filter(category_id=int(department_param))
+            else:
+                queryset = queryset.filter(
+                    Q(category__name__iexact=department_param) |
+                    Q(category__name__icontains=department_param)
+                )
+
+        # Fallback category param if neither industry nor department was provided
+        category_param = self.request.query_params.get('category', '').strip()
+        if category_param and not industry_param and not department_param:
+            if category_param.isdigit():
+                queryset = queryset.filter(
+                    Q(category_id=int(category_param)) |
+                    Q(category__parent_id=int(category_param))
+                )
+            else:
+                queryset = queryset.filter(
+                    Q(category__name__icontains=category_param) |
+                    Q(category__parent__name__icontains=category_param)
+                )
 
         # Filter location
         location_param = self.request.query_params.get('location', '').strip()

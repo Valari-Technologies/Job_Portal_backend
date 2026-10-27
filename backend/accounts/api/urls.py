@@ -8,6 +8,8 @@ from .views import (
     GoogleLoginView,
     CustomTokenObtainPairView,
     UserProfileView,
+    ChangePasswordView,
+    AccountDeleteView,
     CurrentUserMeView,
     EmployerProfileView,
     PasswordResetRequestView,
@@ -124,6 +126,16 @@ urlpatterns = [
         'employer/profile/',
         EmployerProfileView.as_view(),
         name='employer_profile'
+    ),
+    path(
+        'change-password/',
+        ChangePasswordView.as_view(),
+        name='change_password'
+    ),
+    path(
+        'delete-account/',
+        AccountDeleteView.as_view(),
+        name='delete_account'
     ),
     path(
         'password-reset/',

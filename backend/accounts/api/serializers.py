@@ -2015,6 +2015,10 @@ class CandidateJobSerializer(serializers.ModelSerializer):
     company_logo = serializers.SerializerMethodField()
     company_initials = serializers.SerializerMethodField()
     category_name = serializers.SerializerMethodField()
+    industry_id = serializers.SerializerMethodField()
+    industry_name = serializers.SerializerMethodField()
+    department_id = serializers.SerializerMethodField()
+    department_name = serializers.SerializerMethodField()
     work_mode_name = serializers.SerializerMethodField()
     location_name = serializers.SerializerMethodField()
     locations = serializers.SerializerMethodField()
@@ -2034,6 +2038,10 @@ class CandidateJobSerializer(serializers.ModelSerializer):
             'company_initials',
             'category',
             'category_name',
+            'industry_id',
+            'industry_name',
+            'department_id',
+            'department_name',
             'work_mode',
             'work_mode_name',
             'location_name',
@@ -2082,6 +2090,26 @@ class CandidateJobSerializer(serializers.ModelSerializer):
 
     def get_category_name(self, obj):
         return obj.category.name if obj.category else None
+
+    def get_industry_id(self, obj):
+        if not obj.category:
+            return None
+        return obj.category.parent.id if obj.category.parent else obj.category.id
+
+    def get_industry_name(self, obj):
+        if not obj.category:
+            return None
+        return obj.category.parent.name if obj.category.parent else obj.category.name
+
+    def get_department_id(self, obj):
+        if not obj.category:
+            return None
+        return obj.category.id if obj.category.parent else None
+
+    def get_department_name(self, obj):
+        if not obj.category:
+            return None
+        return obj.category.name if obj.category.parent else None
 
     def get_work_mode_name(self, obj):
         return obj.work_mode.name if obj.work_mode else None

@@ -2312,11 +2312,6 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
         candidate_profile = request.user.candidate_profile
 
         existing_app = Application.objects.filter(candidate=candidate_profile, job=job).first()
-        if existing_app:
-            attrs['existing_app'] = existing_app
-            attrs['job_obj'] = job
-            return attrs
-
         raw_app_type = str(attrs.get('application_type') or job.application_type or 'PROFILE_RESUME').upper()
         if 'SIMPLE' in raw_app_type or 'LOCAL' in raw_app_type:
             app_type = 'SIMPLE_LOCAL'
@@ -2325,28 +2320,33 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
         attrs['application_type'] = app_type
         resume_id = attrs.get('resume_id')
 
-        if app_type == 'PROFILE_RESUME':
-            if not resume_id:
-                # Fall back to candidate's default resume if available
-                default_resume = candidate_profile.resumes.filter(is_default=True).first()
-                if default_resume:
-                    attrs['resume_obj'] = default_resume
-                else:
-                    first_resume = candidate_profile.resumes.first()
-                    if first_resume:
-                        attrs['resume_obj'] = first_resume
-                    else:
-                        raise serializers.ValidationError({"resume_id": "A resume is required for professional applications. Please upload a resume first."})
-            else:
-                try:
-                    resume_obj = Resume.objects.get(id=resume_id, candidate=candidate_profile)
-                    attrs['resume_obj'] = resume_obj
-                except Resume.DoesNotExist:
-                    raise serializers.ValidationError({"resume_id": "Selected resume does not exist or belong to your profile."})
-        else:
-            attrs['resume_obj'] = None
+        # 1. Resolve resume object from resume_id if provided
+        resume_obj = None
+        if resume_id:
+            try:
+                resume_obj = Resume.objects.get(id=resume_id, candidate=candidate_profile)
+            except Resume.DoesNotExist:
+                raise serializers.ValidationError({"resume_id": "Selected resume does not exist or belong to your profile."})
 
+        # 2. If not explicitly specified, fall back to candidate's default or primary resume
+        if not resume_obj:
+            resume_obj = candidate_profile.resumes.filter(is_default=True).first() or candidate_profile.resumes.first()
+
+        # 3. For professional jobs, a resume is required
+        if not resume_obj and app_type == 'PROFILE_RESUME':
+            raise serializers.ValidationError({"resume_id": "A resume is required for professional applications. Please upload a resume first."})
+
+        attrs['resume_obj'] = resume_obj
         attrs['job_obj'] = job
+
+        # 4. Handle existing application: update resume if missing and return
+        if existing_app:
+            if not existing_app.resume and resume_obj:
+                existing_app.resume = resume_obj
+                existing_app.save(update_fields=['resume'])
+            attrs['existing_app'] = existing_app
+            return attrs
+
         return attrs
 
 

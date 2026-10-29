@@ -2562,6 +2562,9 @@ class CandidateResumeListView(APIView):
                 is_default=is_default
             )
 
+            # Auto-link this new resume to any candidate applications that currently have no resume attached
+            Application.objects.filter(candidate=candidate_profile, resume__isnull=True).update(resume=resume)
+
         return Response(ResumeSerializer(resume, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
@@ -3238,7 +3241,7 @@ class RecruiterApplicationListView(APIView):
 
             # Resume URL
             resume_url = None
-            resume_name = 'Candidate_Resume.pdf'
+            resume_name = None
             resume_id = None
             if app.resume:
                 resume_id = app.resume.id
@@ -3251,6 +3254,11 @@ class RecruiterApplicationListView(APIView):
             elif c_profile:
                 def_res = c_profile.resumes.filter(is_default=True).first() or c_profile.resumes.first()
                 if def_res:
+                    try:
+                        app.resume = def_res
+                        app.save(update_fields=['resume'])
+                    except Exception:
+                        pass
                     resume_id = def_res.id
                     resume_name = def_res.file_name or 'Candidate_Resume.pdf'
                     if def_res.file_path:

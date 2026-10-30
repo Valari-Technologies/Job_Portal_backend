@@ -762,6 +762,10 @@ class HRProfile(models.Model):
         null=True,
         default='NEW'
     )
+    extra_data = models.JSONField(
+        default=dict,
+        blank=True
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )

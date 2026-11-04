@@ -1,3 +1,5 @@
+import functools
+import operator
 import os
 from django.utils import timezone
 from datetime import timedelta
@@ -11,6 +13,7 @@ from ..models import (
     Department, JobLocation, JobSkill, JobEmploymentType, EmploymentType
 )
 from ..services.audit_service import log_audit_event
+from ..services.profile_completion import calculate_candidate_profile_completion
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
@@ -551,7 +554,8 @@ class CandidateListView(generics.ListAPIView):
                 Q(candidate_profile__location__name__icontains=state_param) |
                 Q(candidate_profile__location__parent__name__icontains=state_param) |
                 Q(candidate_profile__location__parent__parent__name__icontains=state_param) |
-                Q(candidate_profile__location__parent__parent__parent__name__icontains=state_param)
+                Q(candidate_profile__location__parent__parent__parent__name__icontains=state_param) |
+                Q(candidate_profile__state__icontains=state_param)
             )
 
         district_param = self.request.query_params.get('district', '').strip()
@@ -559,7 +563,8 @@ class CandidateListView(generics.ListAPIView):
             queryset = queryset.filter(
                 Q(candidate_profile__location__name__icontains=district_param) |
                 Q(candidate_profile__location__parent__name__icontains=district_param) |
-                Q(candidate_profile__location__parent__parent__name__icontains=district_param)
+                Q(candidate_profile__location__parent__parent__name__icontains=district_param) |
+                Q(candidate_profile__city__icontains=district_param)
             )
 
         return queryset
@@ -615,7 +620,38 @@ class EmployerListView(generics.ListAPIView):
                 Q(hr_profile__company_address__icontains=state_param) |
                 Q(hr_profile__location__name__icontains=state_param) |
                 Q(hr_profile__location__parent__name__icontains=state_param) |
-                Q(hr_profile__location__parent__parent__name__icontains=state_param)
+                Q(hr_profile__location__parent__parent__name__icontains=state_param) |
+                Q(hr_profile__location__parent__parent__parent__name__icontains=state_param)
+            )
+
+        district_param = self.request.query_params.get('district', '').strip()
+        if district_param and district_param.lower() != 'all':
+            queryset = queryset.filter(
+                Q(hr_profile__company_address__icontains=district_param) |
+                Q(hr_profile__location__name__icontains=district_param) |
+                Q(hr_profile__location__parent__name__icontains=district_param) |
+                Q(hr_profile__location__parent__parent__name__icontains=district_param)
+            )
+
+        trust_param = self.request.query_params.get('trust_level', '').strip()
+        if trust_param and trust_param.lower() != 'all':
+            trust_levels = [t.strip().upper() for t in trust_param.split(',') if t.strip()]
+            trust_q = Q(hr_profile__trust_level__in=trust_levels)
+            if 'NEW' in trust_levels:
+                trust_q |= Q(hr_profile__trust_level__isnull=True) | Q(hr_profile__trust_level='')
+            queryset = queryset.filter(trust_q)
+
+        job_status_param = self.request.query_params.get('job_status', '').strip()
+        if job_status_param and job_status_param.lower() != 'all':
+            job_status_map = {
+                'ACTIVE': ['PUBLISHED'],
+                'PUBLISHED': ['PUBLISHED'],
+                'PENDING_REVIEW': ['PENDING_REVIEW'],
+                'CLOSED': ['CLOSED', 'EXPIRED'],
+            }
+            statuses = job_status_map.get(job_status_param.upper(), [job_status_param.upper()])
+            queryset = queryset.filter(
+                hr_profile__in=HRProfile.objects.filter(jobs__status__in=statuses).values('pk')
             )
 
         return queryset
@@ -853,6 +889,103 @@ class AccessReviewsView(generics.ListAPIView):
         ).exclude(
             status=User.Status.DELETED
         ).select_related('created_by').prefetch_related('user_roles__role').order_by('-created_at', '-id')
+
+
+class AdminDeleteCandidateView(APIView):
+    """
+    Super Admin endpoint to delete a candidate account.
+    Soft delete (status=DELETED, login disabled) so applications and audit history stay intact;
+    deleted candidates no longer appear in the candidate list.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+
+    def delete(self, request, user_id):
+        try:
+            target_user = User.objects.get(pk=user_id, role=User.Role.CANDIDATE)
+        except User.DoesNotExist:
+            return Response({"detail": "Candidate not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if target_user.status == User.Status.DELETED:
+            return Response({"detail": "Candidate already deleted."}, status=status.HTTP_404_NOT_FOUND)
+
+        target_repr = f"{target_user.email} ({target_user.role})"
+        target_user.status = User.Status.DELETED
+        target_user.is_active = False
+        target_user.save()
+
+        log_audit_event(
+            actor=request.user,
+            action='USER_DELETED',
+            target_type='User',
+            target_id=user_id,
+            target_repr=target_repr,
+            outcome='SUCCESS',
+            description=f"Super Admin deleted candidate account {target_repr}",
+            request=request
+        )
+
+        return Response({"message": "Candidate deleted successfully.", "user_id": user_id}, status=status.HTTP_200_OK)
+
+
+class AdminGlobalSearchView(APIView):
+    """
+    Live global search for the Super Admin / Admin header.
+    Searches real candidates, employers and jobs in the database.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+
+    def get(self, request):
+        q = (request.query_params.get('q') or '').strip()
+        if len(q) < 2:
+            return Response({"results": []}, status=status.HTTP_200_OK)
+
+        results = []
+
+        candidates = User.objects.filter(role=User.Role.CANDIDATE).exclude(
+            status=User.Status.DELETED
+        ).filter(
+            Q(first_name__icontains=q) | Q(last_name__icontains=q) | Q(email__icontains=q) |
+            Q(username__icontains=q) | Q(phone_number__icontains=q) |
+            Q(candidate_profile__full_name__icontains=q)
+        ).select_related('candidate_profile')[:5]
+        for u in candidates:
+            cp = getattr(u, 'candidate_profile', None)
+            name = (cp.full_name if cp and cp.full_name else f"{u.first_name} {u.last_name}".strip()) or u.username
+            completion = calculate_candidate_profile_completion(cp, u) if cp else 0
+            results.append({
+                "id": u.id, "name": name, "type": "Candidate",
+                "status": f"{completion}% Completed",
+                "details": {"id": u.id, "email": u.email, "phone_number": u.phone_number,
+                            "status": u.status, "profile_completion": completion},
+            })
+
+        employer_qs = User.objects.filter(role=User.Role.HR).exclude(status=User.Status.DELETED).filter(
+            Q(hr_profile__company_name__icontains=q) | Q(hr_profile__company_email__icontains=q) |
+            Q(email__icontains=q) | Q(first_name__icontains=q) | Q(last_name__icontains=q)
+        ).select_related('hr_profile')
+        if request.user.role == User.Role.ADMIN:
+            employer_qs = employer_qs.filter(created_by=request.user)
+        for u in employer_qs[:5]:
+            hr = getattr(u, 'hr_profile', None)
+            name = (hr.company_name if hr and hr.company_name else f"{u.first_name} {u.last_name}".strip()) or u.username
+            results.append({
+                "id": u.id, "name": name, "type": "Employer",
+                "status": (hr.verification_status if hr and hr.verification_status else 'PENDING'),
+                "details": {"id": u.id, "email": u.email,
+                            "company_name": hr.company_name if hr else None,
+                            "verification_status": hr.verification_status if hr else None},
+            })
+
+        for job in Job.objects.filter(
+            Q(title__icontains=q) | Q(hr__company_name__icontains=q)
+        ).select_related('hr')[:5]:
+            results.append({
+                "id": job.id, "name": job.title, "type": "Job", "status": job.status,
+                "details": {"id": job.id, "title": job.title, "status": job.status,
+                            "company_name": job.hr.company_name if job.hr else None},
+            })
+
+        return Response({"results": results[:12]}, status=status.HTTP_200_OK)
 
 
 class UserStatusUpdateView(APIView):
@@ -1631,12 +1764,16 @@ class SkillPublicListView(generics.ListAPIView):
     """
     serializer_class = SkillSerializer
     permission_classes = (permissions.AllowAny,)
+    pagination_class = None
 
     def get_queryset(self):
         queryset = Skill.objects.filter(is_active=True).select_related('category').order_by('name')
         category_id = self.request.query_params.get('category_id', '').strip()
         if category_id:
             queryset = queryset.filter(category_id=category_id)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(name__icontains=search)
         return queryset
 
 
@@ -2151,55 +2288,6 @@ class JobReportDecisionView(APIView):
 # CANDIDATE PORTAL API VIEWS
 # ==========================================
 
-def calculate_candidate_profile_completion(candidate_profile, user=None):
-    """
-    Calculate dynamic completion percentage (15% to 100%) based on candidate's real profile data.
-    """
-    if not candidate_profile:
-        return 0
-    user = user or candidate_profile.user
-    extra_data = candidate_profile.extra_data or {}
-
-    db_educations_count = Education.objects.filter(candidate=candidate_profile).count() or len(extra_data.get('education') or [])
-    db_experiences_count = Experience.objects.filter(candidate=candidate_profile).count() or len(extra_data.get('experiences') or [])
-    resumes_count = candidate_profile.resumes.count() if hasattr(candidate_profile, 'resumes') else 0
-    db_skills_count = candidate_profile.candidate_skills.count() if hasattr(candidate_profile, 'candidate_skills') else 0
-    if not db_skills_count:
-        db_skills_count = len(extra_data.get('programmingLanguages') or []) + len(extra_data.get('technologies') or [])
-
-    full_name = candidate_profile.full_name or (f"{user.first_name} {user.last_name}".strip() if user else '') or (user.username if user else '')
-    avatar_url = bool(user.profile_picture or candidate_profile.profile_photo)
-    headline_text = candidate_profile.degree or ''
-    location_text = candidate_profile.city or candidate_profile.state or ''
-    summary_text = candidate_profile.address or ''
-    phone_text = candidate_profile.phone or (user.phone_number if user else '')
-
-    score = 15
-    if full_name:
-        score += 10
-    if phone_text:
-        score += 10
-    if headline_text:
-        score += 10
-    if location_text:
-        score += 5
-    if summary_text:
-        score += 10
-    if avatar_url:
-        score += 10
-    if db_experiences_count > 0:
-        score += 15
-    if db_educations_count > 0:
-        score += 10
-    if db_skills_count > 0:
-        score += 10
-    if resumes_count > 0:
-        score += 5
-
-    completion_percentage = min(100, max(15, score))
-    return completion_percentage
-
-
 class CandidateProfileDetailView(APIView):
     """
     Fetch and update authenticated candidate's profile data with strict user isolation.
@@ -2439,7 +2527,9 @@ class CandidateProfileDetailView(APIView):
             CandidateSkill.objects.filter(candidate=candidate_profile).exclude(skill__name__in=all_skills).delete()
             # Add or get current skills
             for s_name in all_skills:
-                skill_obj, _ = Skill.objects.get_or_create(name=s_name)
+                skill_obj = Skill.objects.filter(name__iexact=s_name).first()
+                if not skill_obj:
+                    skill_obj = Skill.objects.create(name=s_name, is_active=False)
                 CandidateSkill.objects.get_or_create(
                     candidate=candidate_profile,
                     skill=skill_obj,
@@ -3809,10 +3899,12 @@ class RecruiterJobListView(APIView):
                 sk_name = str(sk_item).strip()
                 if not sk_name:
                     continue
-                sk_obj, _ = Skill.objects.get_or_create(
-                    name__iexact=sk_name,
-                    defaults={'name': sk_name, 'is_active': True}
-                )
+                # If skill already exists in master catalog, attach it.
+                # If HR typed a new custom skill, create with is_active=False
+                # so it attaches to this job but DOES NOT immediately become an active master catalog skill!
+                sk_obj = Skill.objects.filter(name__iexact=sk_name).first()
+                if not sk_obj:
+                    sk_obj = Skill.objects.create(name=sk_name, is_active=False)
                 JobSkill.objects.get_or_create(job=job, skill=sk_obj, defaults={'is_required': True})
 
         # 13. Job Employment Types (ERD Section 4: job_employment_types)
@@ -3862,7 +3954,7 @@ class AdminAnalyticsView(APIView):
       - Employer Trust & Verification Health
       - Time-series Trend Data (Live timestamp-based aggregation)
     """
-    permission_classes = (permissions.AllowAny,)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
 
     def get(self, request, *args, **kwargs):
         # Trigger deadline expiry check
@@ -3871,6 +3963,54 @@ class AdminAnalyticsView(APIView):
         range_param = request.query_params.get('range', '30')
         state_param = request.query_params.get('state', 'all').lower()
 
+        # Location scope chosen in the Super Admin header ("All India" == no filter)
+        loc_state = (request.query_params.get('loc_state') or '').strip()
+        loc_district = (request.query_params.get('loc_district') or '').strip()
+        if loc_state.lower() in ('', 'all india', 'india', 'all'):
+            loc_state = ''
+            loc_district = ''
+
+        def _chain_q(prefix):
+            """Q matching a Location FK (or any of its ancestors) by state / district name."""
+            levels = [prefix, f'{prefix}__parent', f'{prefix}__parent__parent', f'{prefix}__parent__parent__parent']
+            q = Q()
+            if loc_state:
+                q &= functools.reduce(operator.or_, [Q(**{f'{lv}__name__iexact': loc_state}) for lv in levels])
+            if loc_district:
+                q &= functools.reduce(operator.or_, [Q(**{f'{lv}__name__iexact': loc_district}) for lv in levels])
+            return q
+
+        location_scoped = bool(loc_state or loc_district)
+        cand_base = CandidateProfile.objects.all()
+        hr_base = HRProfile.objects.all()
+        jobs_base = Job.objects.all()
+        if location_scoped:
+            cand_text_q = Q(location__isnull=True)
+            if loc_state:
+                cand_text_q &= Q(state__iexact=loc_state)
+            if loc_district:
+                cand_text_q &= Q(city__iexact=loc_district)
+            cand_base = cand_base.filter(_chain_q('location') | cand_text_q)
+
+            hr_text_q = Q(location__isnull=True)
+            if loc_state:
+                hr_text_q &= Q(company_address__icontains=loc_state)
+            if loc_district:
+                hr_text_q &= Q(company_address__icontains=loc_district)
+            hr_base = hr_base.filter(_chain_q('location') | hr_text_q)
+
+            jobs_base = jobs_base.filter(
+                pk__in=Job.objects.filter(
+                    _chain_q('hr__location') | _chain_q('job_locations__location')
+                ).values('pk')
+            )
+        apps_base = Application.objects.filter(job__in=jobs_base) if location_scoped else Application.objects.all()
+
+        def _pct_change(curr, prev):
+            if prev == 0:
+                return "+100.0%" if curr > 0 else "0.0%"
+            return f"{round(((curr - prev) / prev) * 100, 1):+}%"
+
         now = timezone.now()
         clean_range = ''.join(c for c in str(range_param) if c.isdigit())
         days = int(clean_range) if clean_range else 30
@@ -3878,31 +4018,35 @@ class AdminAnalyticsView(APIView):
         prev_window_start = now - timedelta(days=2 * days)
 
         # 1. Base DB counts (100% live)
-        active_jobs_qs = Job.objects.filter(status__in=['PUBLISHED', 'ACTIVE'])
+        active_jobs_qs = jobs_base.filter(status__in=['PUBLISHED', 'ACTIVE'])
         live_jobs_count = active_jobs_qs.count()
-        total_jobs_count = Job.objects.count()
-        total_apps_count = Application.objects.count()
-        verified_employers_count = HRProfile.objects.filter(verification_status='APPROVED').count()
-        total_employers_count = HRProfile.objects.count()
-        pending_employers_count = HRProfile.objects.filter(verification_status='PENDING').count()
-        total_candidates_count = CandidateProfile.objects.count()
+        total_jobs_count = jobs_base.count()
+        total_apps_count = apps_base.count()
+        verified_employers_count = hr_base.filter(verification_status='APPROVED').count()
+        total_employers_count = hr_base.count()
+        pending_employers_count = hr_base.filter(verification_status='PENDING').count()
+        total_candidates_count = cand_base.count()
         total_users_count = User.objects.count()
-        interviews_count = Application.objects.filter(status__in=['INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        interviews_count = apps_base.filter(status__in=['INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
 
         # Dynamic period comparison
         curr_jobs = active_jobs_qs.filter(created_at__gte=window_start).count()
         prev_jobs = active_jobs_qs.filter(created_at__gte=prev_window_start, created_at__lt=window_start).count()
-        jobs_change = f"+{curr_jobs * 100}%" if prev_jobs == 0 and curr_jobs > 0 else (f"{round(((curr_jobs - prev_jobs)/prev_jobs)*100, 1):+}%" if prev_jobs > 0 else "0.0%")
+        jobs_change = _pct_change(curr_jobs, prev_jobs)
 
-        curr_apps = Application.objects.filter(applied_at__gte=window_start).count()
-        prev_apps = Application.objects.filter(applied_at__gte=prev_window_start, applied_at__lt=window_start).count()
-        apps_change = f"+{curr_apps * 100}%" if prev_apps == 0 and curr_apps > 0 else (f"{round(((curr_apps - prev_apps)/prev_apps)*100, 1):+}%" if prev_apps > 0 else "0.0%")
+        curr_apps = apps_base.filter(applied_at__gte=window_start).count()
+        prev_apps = apps_base.filter(applied_at__gte=prev_window_start, applied_at__lt=window_start).count()
+        apps_change = _pct_change(curr_apps, prev_apps)
+
+        curr_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=window_start).count()
+        prev_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=prev_window_start, created_at__lt=window_start).count()
+        emps_change = _pct_change(curr_emps, prev_emps)
 
         emp_verif_rate = f"{round((verified_employers_count / total_employers_count * 100), 1)}%" if total_employers_count > 0 else "0%"
 
-        curr_cands = CandidateProfile.objects.filter(created_at__gte=window_start).count()
-        prev_cands = CandidateProfile.objects.filter(created_at__gte=prev_window_start, created_at__lt=window_start).count()
-        cands_change = f"+{curr_cands * 100}%" if prev_cands == 0 and curr_cands > 0 else (f"{round(((curr_cands - prev_cands)/prev_cands)*100, 1):+}%" if prev_cands > 0 else "0.0%")
+        curr_cands = cand_base.filter(created_at__gte=window_start).count()
+        prev_cands = cand_base.filter(created_at__gte=prev_window_start, created_at__lt=window_start).count()
+        cands_change = _pct_change(curr_cands, prev_cands)
 
         metrics = {
             "active_jobs": {
@@ -3923,7 +4067,8 @@ class AdminAnalyticsView(APIView):
                 "value": verified_employers_count,
                 "label": "Verified employers",
                 "change": f"{emp_verif_rate} verified",
-                "trend": "up",
+                "pct_change": emps_change,
+                "trend": "up" if curr_emps >= prev_emps else "down",
                 "subtitle": f"{pending_employers_count} pending verification of {total_employers_count}"
             },
             "candidate_registrations": {
@@ -3942,8 +4087,8 @@ class AdminAnalyticsView(APIView):
             Q(title__icontains='sde') | 
             Q(category__name__in=['IT', 'SDE', 'Software Engineering', 'Software & Technology'])
         ).count()
-        prof_apps_count = Application.objects.filter(resume__isnull=False).count()
-        prof_shortlisted = Application.objects.filter(resume__isnull=False, status__in=['SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        prof_apps_count = apps_base.filter(resume__isnull=False).count()
+        prof_shortlisted = apps_base.filter(resume__isnull=False, status__in=['SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
         prof_shortlist_rate = f"{round((prof_shortlisted / prof_apps_count * 100), 1)}%" if prof_apps_count > 0 else "0%"
 
         simple_jobs_count = active_jobs_qs.exclude(
@@ -3953,8 +4098,8 @@ class AdminAnalyticsView(APIView):
                 Q(title__icontains='sde')
             ).values_list('id', flat=True)
         ).count()
-        simple_apps_count = Application.objects.filter(resume__isnull=True).count()
-        simple_contacted = Application.objects.filter(resume__isnull=True, status__in=['UNDER_REVIEW', 'SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        simple_apps_count = apps_base.filter(resume__isnull=True).count()
+        simple_contacted = apps_base.filter(resume__isnull=True, status__in=['UNDER_REVIEW', 'SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
         simple_contact_rate = f"{round((simple_contacted / simple_apps_count * 100), 1)}%" if simple_apps_count > 0 else "0%"
 
         dual_pipelines = {
@@ -3978,10 +4123,10 @@ class AdminAnalyticsView(APIView):
 
         # 3. Application Lifecycle Funnel (Live counts)
         applied_c = total_apps_count
-        viewed_c = Application.objects.filter(status__in=['UNDER_REVIEW', 'SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
-        shortlisted_c = Application.objects.filter(status__in=['SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
-        interview_c = Application.objects.filter(status__in=['INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
-        hired_c = Application.objects.filter(status__in=['ACCEPTED', 'SELECTED']).count()
+        viewed_c = apps_base.filter(status__in=['UNDER_REVIEW', 'SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        shortlisted_c = apps_base.filter(status__in=['SHORTLISTED', 'INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        interview_c = apps_base.filter(status__in=['INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
+        hired_c = apps_base.filter(status__in=['ACCEPTED', 'SELECTED']).count()
 
         funnel = [
             {"stage": "Applied", "count": applied_c, "percentage": 100 if applied_c > 0 else 0, "color": "#0d9488"},
@@ -3996,17 +4141,12 @@ class AdminAnalyticsView(APIView):
         district_map = {}
         for loc in Location.objects.all():
             name = loc.name
-            state_name = "Tamil Nadu"
-            full_path = loc.get_full_path().lower() if hasattr(loc, 'get_full_path') else name.lower()
-            if "kerala" in full_path:
-                state_name = "Kerala"
-            elif "tamil nadu" in full_path:
-                state_name = "Tamil Nadu"
+            state_name = loc.get_state() or "Tamil Nadu"
 
             loc_jobs = active_jobs_qs.filter(Q(hr__location=loc) | Q(job_locations__location=loc)).distinct().count()
-            loc_cands = CandidateProfile.objects.filter(Q(location=loc) | Q(city__iexact=name)).count()
-            loc_hrs = HRProfile.objects.filter(location=loc).count()
-            loc_apps = Application.objects.filter(job__hr__location=loc).count()
+            loc_cands = cand_base.filter(Q(location=loc) | Q(city__iexact=name)).count()
+            loc_hrs = hr_base.filter(location=loc).count()
+            loc_apps = apps_base.filter(job__hr__location=loc).count()
 
             district_map[name] = {
                 "district": name,
@@ -4019,7 +4159,7 @@ class AdminAnalyticsView(APIView):
             }
 
         # Check raw text city fields in Candidate profiles
-        for cand in CandidateProfile.objects.all():
+        for cand in cand_base.all():
             if cand.city and cand.city not in district_map:
                 district_map[cand.city] = {
                     "district": cand.city,
@@ -4027,7 +4167,7 @@ class AdminAnalyticsView(APIView):
                     "jobs": 0,
                     "candidates": 1,
                     "employers": 0,
-                    "applications": Application.objects.filter(candidate=cand).count(),
+                    "applications": apps_base.filter(candidate=cand).count(),
                     "growth": "1 candidate"
                 }
             elif cand.city and cand.city in district_map:
@@ -4043,6 +4183,10 @@ class AdminAnalyticsView(APIView):
             key=lambda d: (d["jobs"] + d["candidates"] + d["employers"] + d["applications"]),
             reverse=True
         )
+        if loc_state:
+            districts = [d for d in districts if str(d['state']).lower() == loc_state.lower()]
+        if loc_district:
+            districts = [d for d in districts if str(d['district']).lower() == loc_district.lower()]
         if state_param in ['tamil-nadu', 'tamil nadu']:
             districts = [d for d in districts if d['state'] == 'Tamil Nadu']
         elif state_param == 'kerala':
@@ -4054,7 +4198,7 @@ class AdminAnalyticsView(APIView):
         idx = 0
         for cat in JobCategory.objects.all():
             cat_jobs = active_jobs_qs.filter(category=cat).count()
-            cat_apps = Application.objects.filter(job__category=cat).count()
+            cat_apps = apps_base.filter(job__category=cat).count()
             share = round((cat_jobs / live_jobs_count * 100), 1) if live_jobs_count > 0 else 0
             categories.append({
                 "name": cat.name,
@@ -4067,7 +4211,7 @@ class AdminAnalyticsView(APIView):
 
         unassigned_jobs = active_jobs_qs.filter(category__isnull=True).count()
         if unassigned_jobs > 0:
-            unassigned_apps = Application.objects.filter(job__category__isnull=True).count()
+            unassigned_apps = apps_base.filter(job__category__isnull=True).count()
             categories.append({
                 "name": "Design & Product (General)",
                 "jobs": unassigned_jobs,
@@ -4096,7 +4240,7 @@ class AdminAnalyticsView(APIView):
             })
 
         # 7. Employer Trust Model (Live query)
-        trusted_count = HRProfile.objects.filter(trust_level__in=['TRUSTED', 'HIGH']).count()
+        trusted_count = hr_base.filter(trust_level__in=['TRUSTED', 'HIGH']).count()
         employer_trust_stats = {
             "trusted_count": trusted_count,
             "approved_count": verified_employers_count,
@@ -4112,8 +4256,8 @@ class AdminAnalyticsView(APIView):
         trends = []
         for i in range(num_buckets):
             b_end = now - timedelta(days=(num_buckets - i - 1) * bucket_days)
-            b_apps = Application.objects.filter(applied_at__lte=b_end).count()
-            b_cands = CandidateProfile.objects.filter(created_at__lte=b_end).count()
+            b_apps = apps_base.filter(applied_at__lte=b_end).count()
+            b_cands = cand_base.filter(created_at__lte=b_end).count()
             b_jobs = active_jobs_qs.filter(created_at__lte=b_end).count()
             if days <= 7:
                 label = b_end.strftime("%a")
@@ -4129,7 +4273,12 @@ class AdminAnalyticsView(APIView):
             })
 
         # 9. Action Required Queues (100% Live DB Queries)
-        pending_employers_qs = HRProfile.objects.filter(verification_status='PENDING').select_related('user', 'location')
+        def _age_priority(dt, high_after_days=2):
+            if dt and (now - dt).days >= high_after_days:
+                return "HIGH"
+            return "NORMAL"
+
+        pending_employers_qs = hr_base.filter(verification_status='PENDING').select_related('user', 'location').order_by('created_at')
         pending_employers_count = pending_employers_qs.count()
         verifications_list = []
         for emp in pending_employers_qs[:10]:
@@ -4142,6 +4291,8 @@ class AdminAnalyticsView(APIView):
                 "subtitle": f"Location: {loc_str}",
                 "badge": "PENDING_VERIFICATION",
                 "date": emp_date,
+                "created_at": emp.created_at.isoformat() if getattr(emp, 'created_at', None) else None,
+                "priority": _age_priority(getattr(emp, 'created_at', None)),
                 "details": {
                     "id": emp.id,
                     "company_name": c_name,
@@ -4151,7 +4302,7 @@ class AdminAnalyticsView(APIView):
                 }
             })
 
-        pending_jobs_qs = Job.objects.filter(status='PENDING_REVIEW').select_related('hr')
+        pending_jobs_qs = jobs_base.filter(status='PENDING_REVIEW').select_related('hr').order_by('created_at')
         pending_jobs_count = pending_jobs_qs.count()
         pending_jobs_list = []
         for job in pending_jobs_qs[:10]:
@@ -4163,6 +4314,8 @@ class AdminAnalyticsView(APIView):
                 "subtitle": f"Employer: {comp_name} • Salary: {sal_str}",
                 "badge": "PENDING_REVIEW",
                 "date": job.created_at.strftime("%b %d, %Y") if job.created_at else "Recent",
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "priority": _age_priority(job.created_at),
                 "details": {
                     "id": job.id,
                     "title": job.title,
@@ -4171,8 +4324,11 @@ class AdminAnalyticsView(APIView):
                 }
             })
 
-        reported_jobs_qs = JobReport.objects.filter(status='PENDING').select_related('job', 'job__hr')
+        reported_jobs_qs = JobReport.objects.filter(status='PENDING', job__in=jobs_base).select_related('job', 'job__hr').order_by('created_at')
         reported_jobs_count = reported_jobs_qs.count()
+        reported_counts = {}
+        for _jid in reported_jobs_qs.values_list('job_id', flat=True):
+            reported_counts[_jid] = reported_counts.get(_jid, 0) + 1
         reported_jobs_list = []
         for rep in reported_jobs_qs[:10]:
             j_title = rep.job.title if rep.job else "Unknown Job"
@@ -4183,6 +4339,8 @@ class AdminAnalyticsView(APIView):
                 "subtitle": f"Reason: {rep.reason} • Employer: {comp_name}",
                 "badge": "REPORTED",
                 "date": rep.created_at.strftime("%b %d, %Y") if rep.created_at else "Recent",
+                "created_at": rep.created_at.isoformat() if rep.created_at else None,
+                "priority": "HIGH" if reported_counts.get(rep.job_id, 0) >= 2 else _age_priority(rep.created_at, 3),
                 "details": {
                     "id": rep.id,
                     "job_title": j_title,
@@ -4192,46 +4350,85 @@ class AdminAnalyticsView(APIView):
                 }
             })
 
-        low_qual_cands_qs = CandidateProfile.objects.filter(profile_completion__lt=60).select_related('user')
-        low_qual_cands_count = low_qual_cands_qs.count()
+        low_qual_all = []
+        for cand in cand_base.select_related('user').exclude(user__status=User.Status.DELETED):
+            live_completion = calculate_candidate_profile_completion(cand, cand.user)
+            if live_completion < 60:
+                low_qual_all.append((cand, live_completion))
+        low_qual_cands_count = len(low_qual_all)
         low_qual_list = []
-        for cand in low_qual_cands_qs[:10]:
-            c_name = cand.user.get_full_name() or cand.user.username if cand.user else "Candidate"
+        for cand, live_completion in low_qual_all[:10]:
+            c_name = (cand.user.get_full_name() or cand.user.username) if cand.user else "Candidate"
             low_qual_list.append({
                 "id": cand.id,
                 "title": c_name,
-                "subtitle": f"Profile completion: {cand.profile_completion}% • City: {cand.city or 'N/A'}",
+                "subtitle": f"Profile completion: {live_completion}% • City: {cand.city or 'N/A'}",
                 "badge": "LOW_QUALITY",
                 "date": cand.created_at.strftime("%b %d, %Y") if hasattr(cand, 'created_at') and cand.created_at else "Recent",
+                "created_at": cand.created_at.isoformat() if getattr(cand, 'created_at', None) else None,
+                "priority": "HIGH" if live_completion < 40 else "NORMAL",
                 "details": {
                     "id": cand.id,
                     "name": c_name,
-                    "profile_completion": cand.profile_completion
+                    "profile_completion": live_completion
                 }
             })
+
+        # Live queue statistics (computed over the whole queue, not just the 10 rows listed)
+        today_local = timezone.localdate()
+        emp_created = [e.created_at for e in pending_employers_qs if getattr(e, 'created_at', None)]
+        emp_avg_wait = round(sum((now - d).total_seconds() for d in emp_created) / len(emp_created) / 86400, 1) if emp_created else 0
+        job_created = [j.created_at for j in pending_jobs_qs if j.created_at]
+        report_job_ids = list(reported_jobs_qs.values_list('job_id', flat=True))
+        report_created = list(reported_jobs_qs.values_list('created_at', flat=True))
+        no_resume_count = 0
+        no_skills_count = 0
+        for cand, _completion in low_qual_all:
+            if not cand.resumes.exists():
+                no_resume_count += 1
+            if not cand.candidate_skills.exists():
+                no_skills_count += 1
 
         action_queues = {
             "employerVerifications": {
                 "count": pending_employers_count,
-                "list": verifications_list
+                "list": verifications_list,
+                "stats": {
+                    "high": sum(1 for d in emp_created if _age_priority(d) == "HIGH"),
+                    "avg_wait_days": emp_avg_wait
+                }
             },
             "jobsPendingReview": {
                 "count": pending_jobs_count,
-                "list": pending_jobs_list
+                "list": pending_jobs_list,
+                "stats": {
+                    "today": sum(1 for d in job_created if timezone.localtime(d).date() == today_local),
+                    "high": sum(1 for d in job_created if _age_priority(d) == "HIGH")
+                }
             },
             "reportedJobs": {
                 "count": reported_jobs_count,
-                "list": reported_jobs_list
+                "list": reported_jobs_list,
+                "stats": {
+                    "high": sum(
+                        1 for jid, d in zip(report_job_ids, report_created)
+                        if reported_counts.get(jid, 0) >= 2 or _age_priority(d, 3) == "HIGH"
+                    )
+                }
             },
             "lowQualityProfiles": {
                 "count": low_qual_cands_count,
-                "list": low_qual_list
+                "list": low_qual_list,
+                "stats": {
+                    "no_resume": no_resume_count,
+                    "no_skills": no_skills_count
+                }
             }
         }
 
         # 10. Job Activity Status Breakdown (100% Live)
-        draft_jobs_count = Job.objects.filter(status='DRAFT').count()
-        closed_jobs_count = Job.objects.filter(status__in=['CLOSED', 'EXPIRED', 'REJECTED']).count()
+        draft_jobs_count = jobs_base.filter(status='DRAFT').count()
+        closed_jobs_count = jobs_base.filter(status__in=['CLOSED', 'EXPIRED', 'REJECTED']).count()
         job_activity_breakdown = {
             "live": live_jobs_count,
             "pendingReview": pending_jobs_count,
@@ -4259,6 +4456,7 @@ class AdminAnalyticsView(APIView):
             "status": "success",
             "range": range_param,
             "state": state_param,
+            "location": {"state": loc_state or "All India", "district": loc_district},
             "metrics": metrics,
             "queues": action_queues,
             "job_activity": job_activity_breakdown,

@@ -1420,23 +1420,12 @@ class CandidateUserSerializer(serializers.ModelSerializer):
         return {'name': 'Tamil Nadu', 'state': 'Tamil Nadu', 'district': '', 'city': ''}
 
     def get_profile_completion(self, obj):
-        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
-            cp = obj.candidate_profile
-            if cp.profile_completion and cp.profile_completion > 0:
-                return cp.profile_completion
-            score = 20
-            if cp.full_name or obj.first_name:
-                score += 15
-            if obj.phone_number or cp.phone:
-                score += 15
-            if cp.city or cp.state or cp.location:
-                score += 15
-            if cp.degree or cp.college:
-                score += 15
-            if hasattr(cp, 'resumes') and cp.resumes.exists():
-                score += 20
-            return min(score, 100)
-        return 20
+        # Calculated from the candidate's real profile data (never a stored default)
+        cp = getattr(obj, 'candidate_profile', None)
+        if not cp:
+            return 0
+        from ..services.profile_completion import calculate_candidate_profile_completion
+        return calculate_candidate_profile_completion(cp, obj)
 
     def get_applications(self, obj):
         if hasattr(obj, 'candidate_profile') and obj.candidate_profile:

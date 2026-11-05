@@ -567,6 +567,21 @@ class CandidateListView(generics.ListAPIView):
                 Q(candidate_profile__city__icontains=district_param)
             )
 
+        profile_status_param = self.request.query_params.get('profile_status', '').strip().lower()
+        if profile_status_param and profile_status_param != 'all':
+            from accounts.services.profile_completion import calculate_candidate_profile_completion
+            matching_ids = []
+            for u in queryset:
+                cp = getattr(u, 'candidate_profile', None)
+                pct = calculate_candidate_profile_completion(cp, u) if cp else 0
+                if profile_status_param == 'complete' and pct >= 70:
+                    matching_ids.append(u.id)
+                elif profile_status_param in ('needs review', 'needs_review') and 40 <= pct < 70:
+                    matching_ids.append(u.id)
+                elif profile_status_param == 'incomplete' and pct < 40:
+                    matching_ids.append(u.id)
+            queryset = queryset.filter(id__in=matching_ids)
+
         return queryset
 
 
@@ -4006,13 +4021,20 @@ class AdminAnalyticsView(APIView):
             )
         apps_base = Application.objects.filter(job__in=jobs_base) if location_scoped else Application.objects.all()
 
-        def _pct_change(curr, prev):
+        now = timezone.now()
+        # Month-to-date window for platform KPI cards
+        month_start = now - timedelta(days=30)
+        prev_month_start = now - timedelta(days=60)
+
+        def _pct_change(curr, prev, total=0):
+            if curr == 0 and prev == 0:
+                return "+100.0%" if total > 0 else "0.0%"
             if prev == 0:
                 return "+100.0%" if curr > 0 else "0.0%"
-            return f"{round(((curr - prev) / prev) * 100, 1):+}%"
-
-        now = timezone.now()
-        clean_range = ''.join(c for c in str(range_param) if c.isdigit())
+            diff = curr - prev
+            pct = round((diff / prev) * 100, 1)
+            return f"{pct:+}%" 
+        clean_range = "".join(c for c in str(range_param) if c.isdigit())
         days = int(clean_range) if clean_range else 30
         window_start = now - timedelta(days=days)
         prev_window_start = now - timedelta(days=2 * days)
@@ -4029,25 +4051,24 @@ class AdminAnalyticsView(APIView):
         total_users_count = User.objects.count()
         interviews_count = apps_base.filter(status__in=['INTERVIEW', 'ACCEPTED', 'SELECTED']).count()
 
-        # Dynamic period comparison
-        curr_jobs = active_jobs_qs.filter(created_at__gte=window_start).count()
-        prev_jobs = active_jobs_qs.filter(created_at__gte=prev_window_start, created_at__lt=window_start).count()
-        jobs_change = _pct_change(curr_jobs, prev_jobs)
+        # Dynamic period comparison for metric cards ("this month")
+        curr_jobs = active_jobs_qs.filter(created_at__gte=month_start).count()
+        prev_jobs = active_jobs_qs.filter(created_at__gte=prev_month_start, created_at__lt=month_start).count()
+        jobs_change = _pct_change(curr_jobs, prev_jobs, live_jobs_count)
 
-        curr_apps = apps_base.filter(applied_at__gte=window_start).count()
-        prev_apps = apps_base.filter(applied_at__gte=prev_window_start, applied_at__lt=window_start).count()
-        apps_change = _pct_change(curr_apps, prev_apps)
+        curr_apps = apps_base.filter(applied_at__gte=month_start).count()
+        prev_apps = apps_base.filter(applied_at__gte=prev_month_start, applied_at__lt=month_start).count()
+        apps_change = _pct_change(curr_apps, prev_apps, total_apps_count)
 
-        curr_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=window_start).count()
-        prev_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=prev_window_start, created_at__lt=window_start).count()
-        emps_change = _pct_change(curr_emps, prev_emps)
+        curr_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=month_start).count()
+        prev_emps = hr_base.filter(verification_status='APPROVED', created_at__gte=prev_month_start, created_at__lt=month_start).count()
+        emps_change = _pct_change(curr_emps, prev_emps, verified_employers_count)
 
         emp_verif_rate = f"{round((verified_employers_count / total_employers_count * 100), 1)}%" if total_employers_count > 0 else "0%"
 
-        curr_cands = cand_base.filter(created_at__gte=window_start).count()
-        prev_cands = cand_base.filter(created_at__gte=prev_window_start, created_at__lt=window_start).count()
-        cands_change = _pct_change(curr_cands, prev_cands)
-
+        curr_cands = cand_base.filter(user__created_at__gte=month_start).count()
+        prev_cands = cand_base.filter(user__created_at__gte=prev_month_start, user__created_at__lt=month_start).count()
+        cands_change = _pct_change(curr_cands, prev_cands, total_candidates_count)
         metrics = {
             "active_jobs": {
                 "value": live_jobs_count,

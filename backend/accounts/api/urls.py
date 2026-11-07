@@ -304,6 +304,11 @@ urlpatterns = [
         name='notification_unread_count'
     ),
     path(
+        'admin/notifications/',
+        NotificationListView.as_view(),
+        name='admin_notifications_list'
+    ),
+    path(
         'admin/notifications/broadcast/',
         AdminBroadcastNotificationView.as_view(),
         name='admin_notifications_broadcast'

@@ -942,6 +942,69 @@ class AdminDeleteCandidateView(APIView):
         return Response({"message": "Candidate deleted successfully.", "user_id": user_id}, status=status.HTTP_200_OK)
 
 
+class AdminCandidateActionView(APIView):
+    """
+    Super Admin / Admin endpoint to perform moderation or engagement actions
+    on low-quality candidate profiles (e.g. SEND_REMINDER, MARK_REVIEWED).
+    """
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+
+    def post(self, request, candidate_id):
+        action = request.data.get('action', '').upper().strip()
+        notes = request.data.get('notes', '') or request.data.get('reason', '')
+
+        try:
+            cand = CandidateProfile.objects.select_related('user').filter(
+                Q(pk=candidate_id) | Q(user_id=candidate_id)
+            ).first()
+            if not cand:
+                raise CandidateProfile.DoesNotExist
+        except CandidateProfile.DoesNotExist:
+            return Response({"detail": "Candidate profile not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == 'REMINDER':
+            Notification.objects.create(
+                user=cand.user,
+                notification_type='PROFILE_REMINDER',
+                title='Complete Your Job Profile',
+                message='Your profile completion is below the recommended threshold. Add your summary, skills, and resume to increase interview opportunities from employers.',
+                reference_type='CandidateProfile',
+                reference_id=cand.id
+            )
+            log_audit_event(
+                actor=request.user,
+                action='CANDIDATE_REMINDER',
+                target_type='CandidateProfile',
+                target_id=cand.id,
+                target_repr=f"Candidate #{cand.id} - {cand.user.email}",
+                outcome='SENT',
+                description=f"Profile completion reminder sent to {cand.user.email} by {request.user.email}",
+                request=request
+            )
+            return Response({
+                "message": f"Profile completion reminder sent to {cand.user.email}.",
+                "action": action
+            }, status=status.HTTP_200_OK)
+
+        elif action in ['MARK_REVIEWED', 'REVIEWED', 'DISMISS']:
+            log_audit_event(
+                actor=request.user,
+                action='CANDIDATE_REVIEW',
+                target_type='CandidateProfile',
+                target_id=cand.id,
+                target_repr=f"Candidate #{cand.id} - {cand.user.email}",
+                outcome='REVIEWED',
+                description=f"Profile for {cand.user.email} marked reviewed by {request.user.email}. Notes: {notes}",
+                request=request
+            )
+            return Response({
+                "message": f"Profile for {cand.user.email} marked as reviewed.",
+                "action": action
+            }, status=status.HTTP_200_OK)
+
+        return Response({"detail": "Invalid action. Allowed: REMINDER, MARK_REVIEWED."}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class AdminGlobalSearchView(APIView):
     """
     Live global search for the Super Admin / Admin header.
@@ -1067,18 +1130,13 @@ class EmployerVerificationQueueView(generics.ListAPIView):
 
         # Status filtering
         status_param = self.request.query_params.get('status', '').strip().upper()
-        if status_param and status_param != 'ALL':
-            if status_param == 'PENDING':
-                queryset = queryset.filter(
-                    Q(verification_status='PENDING') | Q(verifications__verification_status='PENDING')
-                ).distinct()
-            else:
-                queryset = queryset.filter(verification_status=status_param)
+        if status_param == 'ALL':
+            pass
+        elif status_param:
+            queryset = queryset.filter(verification_status=status_param)
         else:
             if 'status' not in self.request.query_params:
-                queryset = queryset.filter(
-                    Q(verification_status='PENDING') | Q(verifications__verification_status='PENDING')
-                ).distinct()
+                queryset = queryset.filter(verification_status='PENDING')
 
         # Search filtering
         search = self.request.query_params.get('search', '').strip()
@@ -1116,7 +1174,11 @@ class EmployerVerificationDecisionView(APIView):
             )
 
         try:
-            hr_profile = HRProfile.objects.select_related('user').get(pk=employer_id)
+            hr_profile = HRProfile.objects.select_related('user').filter(
+                Q(pk=employer_id) | Q(user_id=employer_id)
+            ).first()
+            if not hr_profile:
+                raise HRProfile.DoesNotExist
         except HRProfile.DoesNotExist:
             return Response({"detail": "Employer profile not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1153,19 +1215,20 @@ class EmployerVerificationDecisionView(APIView):
                 user.is_active = True
                 user.save()
 
-            # Update existing PENDING verification row for this employer if available, otherwise create record
-            verification = EmployerVerification.objects.filter(
+            # Update all existing PENDING verification rows for this employer to match decision
+            pending_verifs = EmployerVerification.objects.filter(
                 employer=hr_profile,
                 verification_status=EmployerVerification.VerificationStatus.PENDING
-            ).order_by('-submitted_at', '-id').first()
-
-            if verification:
-                verification.verification_status = decision
-                verification.reviewed_at = timezone.now()
-                verification.reviewed_by = request.user
-                verification.rejection_reason = reason if decision in ['REJECTED', 'SUSPENDED'] else ''
-                verification.notes = notes
-                verification.save()
+            )
+            if pending_verifs.exists():
+                pending_verifs.update(
+                    verification_status=decision,
+                    reviewed_at=timezone.now(),
+                    reviewed_by=request.user,
+                    rejection_reason=reason if decision in ['REJECTED', 'SUSPENDED'] else '',
+                    notes=notes
+                )
+                verification = EmployerVerification.objects.filter(employer=hr_profile).order_by('-submitted_at', '-id').first()
             else:
                 verification = EmployerVerification.objects.create(
                     employer=hr_profile,
@@ -1293,7 +1356,9 @@ class JobReviewQueueView(generics.ListAPIView):
 
         # Status filter
         status_param = self.request.query_params.get('status', '').strip().upper()
-        if status_param and status_param != 'ALL':
+        if status_param == 'ALL':
+            pass
+        elif status_param:
             queryset = queryset.filter(status=status_param)
         else:
             if 'status' not in self.request.query_params:
@@ -4317,13 +4382,16 @@ class AdminAnalyticsView(APIView):
                 "details": {
                     "id": emp.id,
                     "company_name": c_name,
-                    "location": loc_str,
                     "contact_email": emp.user.email if emp.user else "",
+                    "phone": emp.company_phone or emp.phone or (emp.user.phone_number if emp.user else ""),
+                    "location": loc_str,
+                    "website": emp.company_website or "N/A",
+                    "address": emp.company_address or loc_str,
                     "status": "PENDING"
                 }
             })
 
-        pending_jobs_qs = jobs_base.filter(status='PENDING_REVIEW').select_related('hr').order_by('created_at')
+        pending_jobs_qs = jobs_base.filter(status='PENDING_REVIEW').select_related('hr', 'work_mode', 'category').order_by('created_at')
         pending_jobs_count = pending_jobs_qs.count()
         pending_jobs_list = []
         for job in pending_jobs_qs[:10]:
@@ -4341,11 +4409,15 @@ class AdminAnalyticsView(APIView):
                     "id": job.id,
                     "title": job.title,
                     "company_name": comp_name,
+                    "salary": sal_str,
+                    "work_mode": job.work_mode.name if job.work_mode else "On-site",
+                    "experience": f"{job.experience_min or 0} - {job.experience_max or 0} Yrs",
+                    "category": job.category.name if job.category else "Unassigned",
                     "status": "PENDING_REVIEW"
                 }
             })
 
-        reported_jobs_qs = JobReport.objects.filter(status='PENDING', job__in=jobs_base).select_related('job', 'job__hr').order_by('created_at')
+        reported_jobs_qs = JobReport.objects.filter(status='PENDING', job__in=jobs_base).select_related('job', 'job__hr', 'reported_by').order_by('created_at')
         reported_jobs_count = reported_jobs_qs.count()
         reported_counts = {}
         for _jid in reported_jobs_qs.values_list('job_id', flat=True):
@@ -4366,7 +4438,9 @@ class AdminAnalyticsView(APIView):
                     "id": rep.id,
                     "job_title": j_title,
                     "company_name": comp_name,
+                    "reported_by": rep.reported_by.email if rep.reported_by else "User",
                     "reason": rep.reason,
+                    "description": rep.description or "Flagged by platform user.",
                     "status": "PENDING"
                 }
             })
@@ -4391,7 +4465,12 @@ class AdminAnalyticsView(APIView):
                 "details": {
                     "id": cand.id,
                     "name": c_name,
-                    "profile_completion": live_completion
+                    "email": cand.user.email if cand.user else "",
+                    "city": cand.city or "Tamil Nadu",
+                    "profile_completion": f"{live_completion}%",
+                    "has_resume": "Yes" if cand.resumes.exists() else "No (Missing)",
+                    "skills_count": cand.candidate_skills.count(),
+                    "status": "LOW_COMPLETION"
                 }
             })
 

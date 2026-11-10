@@ -75,6 +75,7 @@ from .views import (
     RecruiterPlanSubscriptionView,
     AdminAnalyticsView,
     AdminDeleteCandidateView,
+    AdminCandidateActionView,
     AdminGlobalSearchView,
 )
 
@@ -190,6 +191,11 @@ urlpatterns = [
         'admin/candidates/<int:user_id>/',
         AdminDeleteCandidateView.as_view(),
         name='admin_candidate_delete'
+    ),
+    path(
+        'admin/candidates/<int:candidate_id>/action/',
+        AdminCandidateActionView.as_view(),
+        name='admin_candidate_action'
     ),
     path(
         'admin/search/',

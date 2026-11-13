@@ -1,5 +1,6 @@
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
+from .candidate_ai_copilot import CandidateAICopilotChatView
 from .views import (
     CandidateRegisterView,
     HRRegisterView,
@@ -366,6 +367,7 @@ urlpatterns = [
     path('candidate/interviews/summary/', CandidateInterviewSummaryView.as_view(), name='candidate_interview_summary'),
     path('candidate/interviews/<int:pk>/reschedule/', CandidateInterviewRescheduleView.as_view(), name='candidate_interview_reschedule'),
     path('candidate/dashboard/', CandidateDashboardView.as_view(), name='candidate_dashboard'),
+    path('candidate/ai-copilot/chat/', CandidateAICopilotChatView.as_view(), name='candidate_ai_copilot_chat'),
 
     # Recruiter Applications Endpoints
     path('recruiter/applications/', RecruiterApplicationListView.as_view(), name='recruiter_applications_list'),

@@ -2328,9 +2328,9 @@ class CandidateApplicationSubmitSerializer(serializers.Serializer):
         attrs['resume_obj'] = resume_obj
         attrs['job_obj'] = job
 
-        # 4. Handle existing application: update resume if missing and return
+        # 4. Handle existing application: update resume if new resume_obj provided and return
         if existing_app:
-            if not existing_app.resume and resume_obj:
+            if resume_obj and existing_app.resume_id != resume_obj.id:
                 existing_app.resume = resume_obj
                 existing_app.save(update_fields=['resume'])
             attrs['existing_app'] = existing_app

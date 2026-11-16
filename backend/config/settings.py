@@ -25,9 +25,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config("DEBUG", default=False, cast=bool)
+def _parse_debug(val):
+    if isinstance(val, bool):
+        return val
+    s = str(val).lower().strip()
+    return s in ('true', '1', 'yes', 'y', 't', 'on', 'debug')
+
+DEBUG = config("DEBUG", default=True, cast=_parse_debug)
 
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+
+# Google Gemini LLM API Configuration for AI Copilot and Resume Optimizer
+GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
 
 
 # Application definition

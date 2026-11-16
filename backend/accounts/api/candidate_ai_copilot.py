@@ -10,6 +10,7 @@ from accounts.models import (
     CandidateProfile, Job, Application, ApplicationActivity, 
     ApplicationStatusHistory, Notification, Resume
 )
+from accounts.api.gemini_service import call_gemini, get_gemini_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,9 @@ def get_recommended_jobs(candidate, query_text=""):
         elif job.salary_min:
             salary_str = f"From ₹{int(job.salary_min):,}/month"
 
+        raw_app_type = str(job.application_type or 'PROFILE_RESUME').upper()
+        resume_required = not ('SIMPLE' in raw_app_type or 'LOCAL' in raw_app_type)
+
         job_recommendations.append({
             "id": job.id,
             "title": job.title,
@@ -109,6 +113,7 @@ def get_recommended_jobs(candidate, query_text=""):
             "matched_skills": matched_skills,
             "skills": [js.skill.name for js in job.job_skills.all()[:4]],
             "already_applied": is_already_applied,
+            "resume_required": resume_required,
             "score": total_score
         })
 
@@ -153,8 +158,27 @@ def apply_job_for_candidate(candidate, job_id, user):
             "message": f"You have already applied for '{job.title}' at {job.hr.company_name if job.hr else 'this employer'}. Current status: {existing.get_status_display()}."
         }
 
-    # 4. Resolve Resume
-    resume_obj = Resume.objects.filter(candidate=candidate).order_by('-is_primary', '-updated_at').first()
+    # 4. Check Application Type & Resume Requirement
+    raw_app_type = str(job.application_type or 'PROFILE_RESUME').upper()
+    is_simple_local = 'SIMPLE' in raw_app_type or 'LOCAL' in raw_app_type
+    effective_app_type = 'SIMPLE_LOCAL' if is_simple_local else 'PROFILE_RESUME'
+
+    # Resolve candidate resume (Resume model uses is_default, not is_primary)
+    resume_obj = Resume.objects.filter(candidate=candidate).order_by('-is_default', '-updated_at').first()
+
+    # If the job requires a resume (Professional / Profile Resume) and candidate has none
+    if not is_simple_local and not resume_obj:
+        return {
+            "success": False,
+            "requires_resume": True,
+            "job_id": job.id,
+            "job_title": job.title,
+            "company": job.hr.company_name if job.hr else "Company",
+            "message": (
+                f"📄 A resume is required for **'{job.title}'** at **{job.hr.company_name if job.hr else 'this company'}** (Professional Role).\n\n"
+                f"You haven't uploaded a resume yet. Please upload your resume first on the Resume page, then click apply again!"
+            )
+        }
 
     # 5. Create Application in an atomic transaction
     with transaction.atomic():
@@ -164,14 +188,14 @@ def apply_job_for_candidate(candidate, job_id, user):
             resume=resume_obj,
             application_type='AI_COPILOT',
             status=Application.Status.APPLIED,
-            remarks='Applied via AI Career Copilot on candidate instruction'
+            remarks='Applied via Nexiv on candidate instruction'
         )
 
         ApplicationStatusHistory.objects.create(
             application=application,
             status='APPLIED',
             changed_by=user,
-            notes='Application submitted automatically by AI Career Copilot on candidate command'
+            notes='Application submitted automatically by Nexiv on candidate command'
         )
 
         # Notify Recruiter/Employer
@@ -188,13 +212,17 @@ def apply_job_for_candidate(candidate, job_id, user):
             except Exception as notify_err:
                 logger.warning("Could not send recruiter notification: %s", notify_err)
 
+    resume_note = ""
+    if is_simple_local and not resume_obj:
+        resume_note = "\n\n💡 *Note: For this job, a resume is not required (Simple / Local role), so your application was submitted directly with your candidate profile.*"
+
     return {
         "success": True,
         "application_id": application.id,
         "job_title": job.title,
         "company": job.hr.company_name if job.hr else "Company",
         "applied_at": application.applied_at.isoformat(),
-        "message": f"Successfully applied for '{job.title}' at {job.hr.company_name if job.hr else 'Employer'}!"
+        "message": f"Successfully applied for '{job.title}' at {job.hr.company_name if job.hr else 'Employer'}!{resume_note}"
     }
 
 
@@ -265,7 +293,7 @@ class CandidateAICopilotChatView(APIView):
                 ai_count = sum(1 for a in apps if a['applied_via'] == 'AI_COPILOT')
                 reply = f"You have **{len(apps)} recent application(s)** on record"
                 if ai_count > 0:
-                    reply += f" ({ai_count} applied via AI Copilot ✨)"
+                    reply += f" ({ai_count} applied via Nexiv ✨)"
                 reply += ". Here is your latest status:"
 
             return Response({
@@ -321,6 +349,28 @@ class CandidateAICopilotChatView(APIView):
                 f"Based on {skills_str} and your preferences, I found **{unapplied_count} matching job opening(s)** for you.\n\n"
                 f"You can click **Apply with AI** on any card below, or simply tell me *'Apply to {recommended[0]['title']}'*."
             )
+
+        # Enhance reply with Gemini LLM if user asks conversational questions and API key is present
+        if user_message and get_gemini_api_key() and len(user_message.split()) > 1:
+            try:
+                candidate_name = candidate.user.get_full_name() or candidate.user.username
+                active_job_context = [{'title': j['title'], 'company': j['company'], 'salary': j['salary']} for j in recommended[:3]]
+                llm_prompt = (
+                    f"Candidate Name: {candidate_name}\n"
+                    f"Candidate Skills: {skills_str}\n"
+                    f"Top matching jobs on platform: {json.dumps(active_job_context)}\n"
+                    f"Candidate message: {user_message}\n\n"
+                    f"Give a friendly, direct, concise answer (under 3 sentences). "
+                    f"Encourage them to apply or guide them to relevant opportunities."
+                )
+                llm_res = call_gemini(
+                    llm_prompt,
+                    system_instruction="You are Nexiv, the intelligent AI Career Assistant for TN Jobz. Helpful, polite, and practical assistant for job candidates. You understand English and Tamil."
+                )
+                if llm_res.get("success") and llm_res.get("text"):
+                    reply = llm_res["text"].strip()
+            except Exception as llm_err:
+                logger.warning(f"Gemini conversational reply notice: {llm_err}")
 
         return Response({
             "reply": reply,

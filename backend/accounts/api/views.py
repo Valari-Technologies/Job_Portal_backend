@@ -4079,10 +4079,10 @@ class AdminAnalyticsView(APIView):
                 hr_text_q &= Q(company_address__icontains=loc_district)
             hr_base = hr_base.filter(_chain_q('location') | hr_text_q)
 
+            job_loc_match = _chain_q('job_locations__location')
+            job_hr_fallback = Q(job_locations__isnull=True) & _chain_q('hr__location')
             jobs_base = jobs_base.filter(
-                pk__in=Job.objects.filter(
-                    _chain_q('hr__location') | _chain_q('job_locations__location')
-                ).values('pk')
+                pk__in=Job.objects.filter(job_loc_match | job_hr_fallback).values('pk')
             )
         apps_base = Application.objects.filter(job__in=jobs_base) if location_scoped else Application.objects.all()
 

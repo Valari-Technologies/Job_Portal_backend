@@ -1,3 +1,4 @@
+import re
 import json
 import logging
 from django.utils import timezone
@@ -34,8 +35,8 @@ def _get_candidate_profile(user):
 
 def get_recommended_jobs(candidate, query_text=""):
     """
-    Intelligently retrieves and scores active published jobs matching
-    the candidate's skills, experience, location, and past applications.
+    Intelligently retrieves and scores active published jobs.
+    Returns: (exact_matches, profile_matches, specific_requested, filter_term)
     """
     today = timezone.now().date()
     active_jobs = Job.objects.filter(
@@ -45,10 +46,10 @@ def get_recommended_jobs(candidate, query_text=""):
     ).select_related(
         'hr', 'category', 'work_mode'
     ).prefetch_related(
-        'job_skills__skill', 'job_locations__location'
+        'job_skills__skill', 'job_locations__location', 'job_locations__location__parent'
     ).order_by('-created_at')
 
-    # Get already applied job IDs to avoid proposing already-applied jobs
+    # Get already applied job IDs
     applied_job_ids = set(
         Application.objects.filter(candidate=candidate).values_list('job_id', flat=True)
     )
@@ -57,38 +58,60 @@ def get_recommended_jobs(candidate, query_text=""):
         s.skill.name.lower() for s in candidate.candidate_skills.all()
     ) if hasattr(candidate, 'candidate_skills') else set()
 
-    # Collect past applied job titles for preferences
-    past_applied_titles = set(
-        Application.objects.filter(candidate=candidate).values_list('job__title', flat=True)
-    )
+    # Identify specific search filter terms (e.g. location or specific title/skill)
+    STOP_WORDS = {
+        'job', 'jobs', 'in', 'at', 'for', 'the', 'a', 'an', 'me', 'show', 'find', 'recommend',
+        'matching', 'my', 'skills', 'skill', 'openings', 'opening', 'vacancies', 'vacancy', 'please', 'all',
+        'give', 'look', 'available', 'what', 'whats', "what's", 'who', 'whos', "who's", 'where', 'how', 'why',
+        'when', 'is', 'are', 'am', 'was', 'were', 'do', 'does', 'did', 'can', 'could', 'tell', 'want', 'search',
+        'portal', 'list', 'profile', 'status', 'strength', 'completion', 'detail', 'details', 'about', 'mine', 'to'
+    }
 
-    job_recommendations = []
-    query_lower = query_text.lower().strip() if query_text else ""
+    raw_query = (query_text or "").lower().strip()
+    tokens = [re.sub(r'[^a-zA-Z0-9]', '', t) for t in raw_query.split()]
+    meaningful_tokens = [t for t in tokens if t and t not in STOP_WORDS]
+    filter_term = " ".join(meaningful_tokens).strip()
+    specific_requested = bool(filter_term and len(filter_term) >= 2)
+
+    exact_matches = []
+    profile_matches = []
 
     for job in active_jobs:
-        # Check if already applied
         is_already_applied = job.id in applied_job_ids
 
         # Skill match calculation
-        job_skills = set(
-            js.skill.name.lower() for js in job.job_skills.all()
-        )
+        job_skills = set(js.skill.name.lower() for js in job.job_skills.all())
         matched_skills = list(candidate_skills.intersection(job_skills))
-        skill_score = len(matched_skills) * 20
+        skill_score = len(matched_skills) * 25
 
-        # Location text
-        locations = [jl.location.name for jl in job.job_locations.all()]
-        loc_str = ", ".join(locations) if locations else "Tamil Nadu"
+        # All locations including ancestors (state, district, city)
+        loc_names = []
+        for jl in job.job_locations.all():
+            curr = jl.location
+            while curr:
+                loc_names.append(curr.name.lower())
+                curr = curr.parent
 
-        # Query text match bonus
+        locations_display = [jl.location.name for jl in job.job_locations.all()]
+        loc_str = ", ".join(locations_display) if locations_display else "Tamil Nadu"
+
+        # Check if this job specifically matches the candidate's query
+        is_query_match = False
         query_score = 0
-        if query_lower:
-            if query_lower in job.title.lower():
+        if specific_requested:
+            # Check title, skills, company, or any location/state ancestor
+            if any(t in job.title.lower() for t in meaningful_tokens):
+                query_score += 50
+                is_query_match = True
+            if any(any(t in s for t in meaningful_tokens) for s in job_skills):
                 query_score += 40
-            if any(query_lower in s for s in job_skills):
+                is_query_match = True
+            if any(any(t in l for t in meaningful_tokens) for l in loc_names):
+                query_score += 50
+                is_query_match = True
+            if job.hr and any(t in (job.hr.company_name or '').lower() for t in meaningful_tokens):
                 query_score += 30
-            if any(query_lower in loc.lower() for loc in locations):
-                query_score += 25
+                is_query_match = True
 
         total_score = skill_score + query_score
 
@@ -102,7 +125,7 @@ def get_recommended_jobs(candidate, query_text=""):
         raw_app_type = str(job.application_type or 'PROFILE_RESUME').upper()
         resume_required = not ('SIMPLE' in raw_app_type or 'LOCAL' in raw_app_type)
 
-        job_recommendations.append({
+        job_item = {
             "id": job.id,
             "title": job.title,
             "company": job.hr.company_name if job.hr else "Verified Employer",
@@ -115,11 +138,16 @@ def get_recommended_jobs(candidate, query_text=""):
             "already_applied": is_already_applied,
             "resume_required": resume_required,
             "score": total_score
-        })
+        }
 
-    # Sort: unapplied first, then by score, then recency
-    job_recommendations.sort(key=lambda x: (not x["already_applied"], x["score"]), reverse=True)
-    return job_recommendations[:8]
+        if is_query_match:
+            exact_matches.append(job_item)
+        profile_matches.append(job_item)
+
+    exact_matches.sort(key=lambda x: (not x["already_applied"], x["score"]), reverse=True)
+    profile_matches.sort(key=lambda x: (not x["already_applied"], x["score"]), reverse=True)
+
+    return exact_matches[:8], profile_matches[:8], specific_requested, filter_term
 
 
 def apply_job_for_candidate(candidate, job_id, user):
@@ -246,6 +274,38 @@ def get_candidate_application_summary(candidate):
     return results
 
 
+def get_candidate_profile_summary(candidate):
+    """
+    Extracts structured summary of the candidate's real profile data.
+    """
+    skills = [s.skill.name for s in candidate.candidate_skills.all()] if hasattr(candidate, 'candidate_skills') else []
+    profile_completion = getattr(candidate, 'profile_completion', 0) or 0
+    experiences = list(candidate.experiences.all()) if hasattr(candidate, 'experiences') else []
+    educations = list(candidate.educations.all()) if hasattr(candidate, 'educations') else []
+
+    missing = []
+    if not skills:
+        missing.append("Skills & Tech Stack (Add programming languages & technologies)")
+    if not experiences and (candidate.experience_total or 0) == 0:
+        missing.append("Work Experience")
+    if not educations and not candidate.college and not candidate.degree:
+        missing.append("Education Details")
+    if not candidate.user.first_name and not getattr(candidate, 'title', None):
+        missing.append("Professional Headline")
+
+    return {
+        "skills": skills,
+        "profile_completion": profile_completion,
+        "experience_total": candidate.experience_total or 0,
+        "has_skills": bool(skills),
+        "is_complete": profile_completion >= 80,
+        "missing_sections": missing,
+        "college": candidate.college,
+        "degree": candidate.degree,
+        "full_name": candidate.user.get_full_name() or candidate.user.username
+    }
+
+
 class CandidateAICopilotChatView(APIView):
     """
     Intelligent AI Career Copilot endpoint for candidates.
@@ -302,13 +362,72 @@ class CandidateAICopilotChatView(APIView):
                 "suggested_actions": ["Recommend jobs matching my skills", "Apply to a new job"]
             })
 
-        # 3. DIRECT ACTION EXECUTION: 'RECOMMEND_JOBS' or natural language search
+        # 3. DIRECT INTENT: 'PROFILE_OR_SKILLS_QUERY'
         lower_msg = user_message.lower()
+        is_profile_query = any(p in lower_msg for p in [
+            'my skill', 'my skills', 'what are my skill', "what's my skill", "whats my skill",
+            'what is my skill', 'list my skill', 'show my skill', 'tell my skill', 'check my skill',
+            'my profile', 'profile status', 'profile strength', 'profile completion', 'finish my profile',
+            'complete my profile', 'my experience', 'my education', 'about me', 'who am i', 'my details',
+            'how is my profile', 'view my profile'
+        ])
 
-        # Check if user commanded to apply by text (e.g., "apply to job 5" or "apply for react developer")
+        if is_profile_query:
+            prof_data = get_candidate_profile_summary(candidate)
+            cand_name = prof_data["full_name"]
+
+            if not prof_data["has_skills"]:
+                missing_bullets = "\n".join([f"• {m}" for m in prof_data["missing_sections"]]) if prof_data["missing_sections"] else "• Skills & Technologies"
+                reply = (
+                    f"Hi **{cand_name}**, you haven't added any skills to your profile yet!\n\n"
+                    f"📊 **Profile Strength:** {prof_data['profile_completion']}%\n\n"
+                    f"Missing items to complete:\n{missing_bullets}\n\n"
+                    f"To help me accurately match and recommend jobs for your career, please complete your profile by adding your skills, programming languages, and experience."
+                )
+                suggested = ["Complete Profile", "Recommend jobs matching my skills", "Track my applications"]
+            else:
+                skills_list_str = ", ".join(prof_data["skills"])
+                reply = (
+                    f"Hi **{cand_name}**, here are your recorded profile details:\n\n"
+                    f"🎯 **Skills & Tech Stack:** {skills_list_str}\n"
+                    f"📊 **Profile Strength:** {prof_data['profile_completion']}%\n"
+                    f"💼 **Total Experience:** {prof_data['experience_total']} year(s)\n\n"
+                    f"Would you like me to recommend active jobs matching these skills?"
+                )
+                suggested = ["Recommend jobs matching my skills", "Complete Profile", "Track my applications"]
+
+            # Enhance with Gemini if available
+            if get_gemini_api_key():
+                try:
+                    llm_prompt = (
+                        f"Candidate Name: {cand_name}\n"
+                        f"User asked: {user_message}\n"
+                        f"Candidate Profile Data:\n"
+                        f"- Profile Completion: {prof_data['profile_completion']}%\n"
+                        f"- Skills: {', '.join(prof_data['skills']) if prof_data['skills'] else 'No skills added yet'}\n"
+                        f"- Total Experience: {prof_data['experience_total']} years\n"
+                        f"- Missing sections: {', '.join(prof_data['missing_sections']) if prof_data['missing_sections'] else 'None'}\n\n"
+                        f"Answer the user's question directly, accurately, and politely (under 3 sentences). "
+                        f"If their profile is incomplete or has no skills, clearly explain that they need to complete their profile (mentioning their current completion %) to unlock accurate job matching."
+                    )
+                    llm_res = call_gemini(
+                        llm_prompt,
+                        system_instruction="You are Nexiv, the intelligent AI Career Assistant for TN Jobz. Helpful, polite, and practical assistant for job candidates. You understand English and Tamil."
+                    )
+                    if llm_res.get("success") and llm_res.get("text"):
+                        reply = llm_res["text"].strip()
+                except Exception as llm_err:
+                    logger.warning(f"Gemini conversational profile reply notice: {llm_err}")
+
+            return Response({
+                "reply": reply,
+                "suggested_actions": suggested
+            })
+
+        # 4. DIRECT ACTION EXECUTION: 'APPLY_JOB' by natural language
         if lower_msg.startswith("apply") or "apply to" in lower_msg or "apply for" in lower_msg:
-            # Check if job_id was mentioned or find matching recommended job
-            jobs = get_recommended_jobs(candidate, query_text=lower_msg.replace("apply", "").replace("to", "").replace("for", ""))
+            exact_m, prof_m, _, _ = get_recommended_jobs(candidate, query_text=lower_msg.replace("apply", "").replace("to", "").replace("for", ""))
+            jobs = exact_m if exact_m else prof_m
             unapplied = [j for j in jobs if not j["already_applied"]]
 
             if target_job_id:
@@ -336,33 +455,99 @@ class CandidateAICopilotChatView(APIView):
                     "recommended_jobs": jobs[:4]
                 })
 
-        # Default: Personalized recommendations based on candidate's skills & history
-        recommended = get_recommended_jobs(candidate, query_text=user_message)
-        skills_list = [s.skill.name for s in candidate.candidate_skills.all()] if hasattr(candidate, 'candidate_skills') else []
-        skills_str = ", ".join(skills_list[:3]) if skills_list else "your profile"
+        # 5. Default: Intelligent search & personalized recommendations
+        exact_matches, profile_matches, specific_requested, filter_term = get_recommended_jobs(candidate, query_text=user_message)
+        prof_data = get_candidate_profile_summary(candidate)
+        has_skills = prof_data["has_skills"]
+        skills_str = ", ".join(prof_data["skills"][:4]) if has_skills else ""
+        candidate_name = prof_data["full_name"]
 
-        if not recommended:
-            reply = "I looked across all active listings, but there are no open vacancies right now. Check back soon as new jobs are published daily!"
+        if specific_requested:
+            filter_title = filter_term.title()
+            if exact_matches:
+                recommended = exact_matches
+                unapplied_count = sum(1 for j in recommended if not j['already_applied'])
+                reply = (
+                    f"I found **{unapplied_count} active job opening(s)** matching **{filter_title}** for you.\n\n"
+                    f"You can click **Apply with Nexiv** on any card below, or simply tell me *'Apply to {recommended[0]['title']}'*."
+                )
+                llm_prompt = (
+                    f"Candidate Name: {candidate_name}\n"
+                    f"Candidate Skills: {skills_str if has_skills else 'No skills added yet'}\n"
+                    f"Candidate requested: {user_message}\n"
+                    f"Status: Found {len(exact_matches)} active job opening(s) specifically matching '{filter_title}':\n"
+                    f"{json.dumps([{'title': j['title'], 'company': j['company'], 'location': j['location'], 'salary': j['salary']} for j in recommended[:3]])}\n\n"
+                    f"Write a friendly, professional response (under 3 sentences) confirming these matching jobs in {filter_title} and encouraging them to apply."
+                )
+            else:
+                # No active jobs match the requested location/role/skill!
+                recommended = profile_matches
+                if has_skills:
+                    reply = (
+                        f"Currently, there are no active job openings matching **{filter_title}** on the platform.\n\n"
+                        f"However, I analyzed your profile and skills in **{skills_str}**, and found these top alternative opportunities for you in other locations:"
+                    )
+                    llm_prompt = (
+                        f"Candidate Name: {candidate_name}\n"
+                        f"Candidate Skills: {skills_str}\n"
+                        f"Candidate requested: {user_message}\n"
+                        f"Status: Currently, there are NO active job openings matching '{filter_title}' on the platform.\n"
+                        f"Alternative jobs matching candidate profile: {json.dumps([{'title': j['title'], 'company': j['company'], 'location': j['location'], 'salary': j['salary']} for j in recommended[:3]])}\n\n"
+                        f"Write a friendly, polite, transparent response (under 3 sentences):\n"
+                        f"1. Clearly state that there are currently no active job openings in '{filter_title}'.\n"
+                        f"2. Explain that you analyzed their profile and skills ({skills_str}), and found matching alternative opportunities in other locations.\n"
+                        f"3. Encourage them to explore or apply for these available opportunities."
+                    )
+                else:
+                    reply = (
+                        f"Currently, there are no active job openings matching **{filter_title}** on the platform.\n\n"
+                        f"Also, you haven't added your skills to your profile yet (your profile completion is currently **{prof_data['profile_completion']}%**). "
+                        f"In the meantime, here are top active openings available across other locations:"
+                    )
+                    llm_prompt = (
+                        f"Candidate Name: {candidate_name}\n"
+                        f"Candidate Profile: No skills added yet (Profile Completion: {prof_data['profile_completion']}%)\n"
+                        f"Candidate requested: {user_message}\n"
+                        f"Status: Currently, there are NO active job openings matching '{filter_title}'.\n"
+                        f"Alternative platform jobs: {json.dumps([{'title': j['title'], 'company': j['company'], 'location': j['location'], 'salary': j['salary']} for j in recommended[:3]])}\n\n"
+                        f"Write a friendly, transparent response (under 3 sentences):\n"
+                        f"1. State that there are currently no active openings in '{filter_title}'.\n"
+                        f"2. Note that their profile has no skills added yet (at {prof_data['profile_completion']}% completion) and advise completing their profile for accurate recommendations.\n"
+                        f"3. Present the alternative jobs available on the platform."
+                    )
         else:
-            unapplied_count = sum(1 for j in recommended if not j['already_applied'])
-            reply = (
-                f"Based on {skills_str} and your preferences, I found **{unapplied_count} matching job opening(s)** for you.\n\n"
-                f"You can click **Apply with AI** on any card below, or simply tell me *'Apply to {recommended[0]['title']}'*."
-            )
-
-        # Enhance reply with Gemini LLM if user asks conversational questions and API key is present
-        if user_message and get_gemini_api_key() and len(user_message.split()) > 1:
-            try:
-                candidate_name = candidate.user.get_full_name() or candidate.user.username
-                active_job_context = [{'title': j['title'], 'company': j['company'], 'salary': j['salary']} for j in recommended[:3]]
+            # General profile recommendations
+            recommended = profile_matches
+            if not has_skills:
+                reply = (
+                    f"Hi **{candidate_name}**, you haven't added any skills to your profile yet (your profile completion is at **{prof_data['profile_completion']}%**)!\n\n"
+                    f"To get accurate job recommendations tailored to your expertise, please add your skills in your **Profile**.\n\n"
+                    f"In the meantime, here are the top active job openings currently available on the platform:"
+                )
+                llm_prompt = (
+                    f"Candidate Name: {candidate_name}\n"
+                    f"Candidate Profile: No skills added yet (Profile completion: {prof_data['profile_completion']}%)\n"
+                    f"Candidate message: {user_message}\n"
+                    f"Available platform jobs: {json.dumps([{'title': j['title'], 'company': j['company'], 'location': j['location'], 'salary': j['salary']} for j in recommended[:3]])}\n\n"
+                    f"Write a friendly response (under 3 sentences) explaining that they haven't added skills yet (mentioning {prof_data['profile_completion']}% completion) and advising them to complete their profile for tailored matching, while introducing the active platform openings."
+                )
+            else:
+                unapplied_count = sum(1 for j in recommended if not j['already_applied'])
+                reply = (
+                    f"Based on your profile, skills in **{skills_str}**, and preferences, I found **{unapplied_count} matching job opening(s)** for you.\n\n"
+                    f"You can click **Apply with Nexiv** on any card below, or simply tell me *'Apply to {recommended[0]['title']}'*."
+                )
                 llm_prompt = (
                     f"Candidate Name: {candidate_name}\n"
                     f"Candidate Skills: {skills_str}\n"
-                    f"Top matching jobs on platform: {json.dumps(active_job_context)}\n"
-                    f"Candidate message: {user_message}\n\n"
-                    f"Give a friendly, direct, concise answer (under 3 sentences). "
-                    f"Encourage them to apply or guide them to relevant opportunities."
+                    f"Candidate message: {user_message}\n"
+                    f"Active recommended jobs: {json.dumps([{'title': j['title'], 'company': j['company'], 'location': j['location'], 'salary': j['salary']} for j in recommended[:3]])}\n\n"
+                    f"Give a friendly, direct, concise answer (under 3 sentences) highlighting how these jobs match their skills ({skills_str}) and invite them to apply."
                 )
+
+        # Enhance reply with Gemini LLM if API key is present
+        if llm_prompt and get_gemini_api_key():
+            try:
                 llm_res = call_gemini(
                     llm_prompt,
                     system_instruction="You are Nexiv, the intelligent AI Career Assistant for TN Jobz. Helpful, polite, and practical assistant for job candidates. You understand English and Tamil."
@@ -372,13 +557,15 @@ class CandidateAICopilotChatView(APIView):
             except Exception as llm_err:
                 logger.warning(f"Gemini conversational reply notice: {llm_err}")
 
+        suggested = ["Complete Profile", "Track my applications"] if not has_skills else ["Track my applications", "Show my applications"]
+        if specific_requested and filter_term != "tamil nadu":
+            suggested.insert(0, "Jobs in Tamil Nadu")
+        elif not specific_requested and has_skills:
+            suggested.insert(0, f"Apply to {recommended[0]['title']}" if recommended else "Jobs in Tamil Nadu")
+
         return Response({
             "reply": reply,
             "recommended_jobs": recommended,
-            "suggested_actions": [
-                f"Apply to {recommended[0]['title']}" if recommended else "Track my applications",
-                "Show my applications",
-                "Jobs in Tamil Nadu"
-            ]
+            "suggested_actions": suggested
         })
 

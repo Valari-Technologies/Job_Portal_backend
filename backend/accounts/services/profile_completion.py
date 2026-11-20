@@ -3,7 +3,7 @@ from ..models import Education, Experience
 
 def calculate_candidate_profile_completion(candidate_profile, user=None):
     """
-    Calculate dynamic completion percentage (15% to 100%) based on candidate's real profile data.
+    Calculate dynamic completion percentage (0% to 100%) based strictly on candidate's real profile data.
     """
     if not candidate_profile:
         return 0
@@ -20,19 +20,22 @@ def calculate_candidate_profile_completion(candidate_profile, user=None):
     full_name = candidate_profile.full_name or (f"{user.first_name} {user.last_name}".strip() if user else '') or (user.username if user else '')
     avatar_url = bool(user.profile_picture or candidate_profile.profile_photo)
     headline_text = candidate_profile.degree or ''
-    location_text = candidate_profile.city or candidate_profile.state or ''
+    has_real_location = bool(candidate_profile.location or candidate_profile.city or candidate_profile.state or candidate_profile.address)
     summary_text = candidate_profile.address or ''
     phone_text = candidate_profile.phone or (user.phone_number if user else '')
 
-    score = 15
+    score = 0
+    # Basic registration credentials: 10%
     if full_name:
-        score += 10
+        score += 5
     if phone_text:
-        score += 10
+        score += 5
+
+    # Core profile content sections: 90%
     if headline_text:
         score += 10
-    if location_text:
-        score += 5
+    if has_real_location:
+        score += 10
     if summary_text:
         score += 10
     if avatar_url:
@@ -40,11 +43,11 @@ def calculate_candidate_profile_completion(candidate_profile, user=None):
     if db_experiences_count > 0:
         score += 15
     if db_educations_count > 0:
-        score += 10
+        score += 15
     if db_skills_count > 0:
-        score += 10
+        score += 15
     if resumes_count > 0:
-        score += 5
+        score += 10
 
-    completion_percentage = min(100, max(15, score))
+    completion_percentage = min(100, max(0, score))
     return completion_percentage

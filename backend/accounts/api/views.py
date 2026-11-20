@@ -153,6 +153,22 @@ class AdminCreateUserView(generics.CreateAPIView):
             )
 
         self.perform_create(serializer)
+        new_user = serializer.instance
+        if target_role == User.Role.HR and new_user:
+            try:
+                AuditEvent.objects.create(
+                    actor=request.user,
+                    actor_email=request.user.email,
+                    action="CREATE_RECRUITER",
+                    target_type="EMPLOYER",
+                    target_id=str(new_user.id),
+                    target_repr=f"{new_user.get_full_name() or new_user.username}",
+                    description=f"Admin {request.user.email} created Recruiter account for {new_user.get_full_name() or new_user.username}",
+                    outcome=AuditEvent.Outcome.SUCCESS
+                )
+            except Exception:
+                pass
+
         return Response(
             {
                 "message": f"{target_role} account created successfully.",
@@ -728,6 +744,19 @@ class AdminUpdateEmployerDetailView(APIView):
         if 'designation' in data:
             profile.designation = data['designation']
         
+        if 'trust_level' in data:
+            tl = str(data['trust_level']).upper().strip()
+            if tl in ['NEW', 'BASIC', 'TRUSTED', 'HIGH']:
+                profile.trust_level = tl
+                trust_obj, _ = EmployerTrust.objects.get_or_create(employer=profile)
+                trust_obj.trust_level = tl
+                trust_obj.is_trusted = (tl in ['TRUSTED', 'HIGH'])
+                if trust_obj.is_trusted and not trust_obj.trusted_at:
+                    trust_obj.trusted_at = timezone.now()
+                elif not trust_obj.is_trusted:
+                    trust_obj.trusted_at = None
+                trust_obj.save()
+
         logo = data.get('company_logo') or data.get('profile_photo')
         if logo:
             profile.company_logo = logo
@@ -781,14 +810,20 @@ class StandardResultsSetPagination(PageNumberPagination):
 
 class AuditEventListView(generics.ListAPIView):
     """
-    Super Admin–only paginated API with filters for date range, actor, action, outcome, and target.
+    Super Admin & Admin paginated API with filters for date range, actor, action, outcome, and target.
     """
     serializer_class = AuditEventSerializer
-    permission_classes = (permissions.IsAuthenticated, IsSuperAdminRole)
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
+        user = self.request.user
         queryset = AuditEvent.objects.select_related('actor').order_by('-timestamp', '-id')
+
+        if user.role == User.Role.ADMIN:
+            queryset = queryset.filter(
+                Q(actor=user) | Q(actor_email=user.email) | Q(target_type='EMPLOYER') | Q(action__icontains='RECRUITER')
+            )
 
         start_date = self.request.query_params.get('start_date', '').strip()
         if start_date:
@@ -1520,7 +1555,12 @@ class EmployerJobSubmitView(APIView):
             )
 
         with transaction.atomic():
-            job.status = Job.Status.PENDING_REVIEW
+            if hr_profile.trust_level in ['TRUSTED', 'HIGH']:
+                job.status = Job.Status.ACTIVE
+                job.is_approved = True
+                job.posted_at = timezone.now()
+            else:
+                job.status = Job.Status.PENDING_REVIEW
             job.save()
 
             # Notify Super Admins / Moderators
@@ -3909,8 +3949,11 @@ class RecruiterJobListView(APIView):
             except Exception:
                 pass
 
-        # 10. Status: default to PENDING_REVIEW as per moderation flow
-        initial_status = Job.Status.PENDING_REVIEW
+        # 10. Status: if employer is TRUSTED, auto-publish directly to ACTIVE
+        if hr_profile.trust_level in ['TRUSTED', 'HIGH']:
+            initial_status = Job.Status.ACTIVE
+        else:
+            initial_status = Job.Status.PENDING_REVIEW
 
         # Create Job instance
         job = Job.objects.create(
@@ -4333,7 +4376,7 @@ class AdminAnalyticsView(APIView):
             "pending_count": pending_employers_count,
             "direct_publish_rate": f"{round((trusted_count / total_employers_count * 100), 1)}%" if total_employers_count > 0 else "0%",
             "approval_rate": emp_verif_rate,
-            "avg_review_hours": f"{pending_employers_count} in queue"
+            "avg_review_hours": str(pending_employers_count)
         }
 
         # 8. Time-series Trends (Live cumulative timeline up to selected date range for ACTIVE jobs)
@@ -4877,6 +4920,112 @@ class RecruiterPlanSubscriptionView(APIView):
             "message": f"Successfully activated {selected_plan['name']}! {selected_plan['credits']} job credits added.",
             "commerce": commerce
         }, status=status.HTTP_200_OK)
+
+
+class AdminDashboardView(APIView):
+    """
+    Live aggregated dashboard metrics, recent activity, and notifications count
+    for Admin & Super Admin users. Computes real-time live data from the database.
+    """
+    permission_classes = (permissions.IsAuthenticated, IsAdminRole)
+
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        now = timezone.now()
+        month_ago = now - timedelta(days=30)
+        two_months_ago = now - timedelta(days=60)
+
+        # Base recruiter queryset
+        recruiter_qs = User.objects.filter(role=User.Role.HR).exclude(status=User.Status.DELETED)
+        if user.role == User.Role.ADMIN:
+            admin_created = recruiter_qs.filter(created_by=user)
+            if admin_created.exists():
+                recruiter_qs = admin_created
+
+        total_recruiters = recruiter_qs.count()
+        active_recruiters = recruiter_qs.filter(status=User.Status.ACTIVE).count()
+        suspended_recruiters = recruiter_qs.filter(status=User.Status.SUSPENDED).count()
+        pending_activations = recruiter_qs.filter(
+            Q(status=User.Status.INACTIVE) |
+            Q(hr_profile__verification_status='PENDING') |
+            Q(hr_profile__verification_status='UNSUBMITTED')
+        ).count()
+
+        # Month-over-month trend calculation
+        curr_month_total = recruiter_qs.filter(created_at__gte=month_ago).count()
+        prev_month_total = recruiter_qs.filter(created_at__gte=two_months_ago, created_at__lt=month_ago).count()
+
+        def calc_pct_text(curr, prev, total):
+            if prev == 0:
+                return "↑ 100% from last month" if curr > 0 else ("0% from last month" if total == 0 else "↑ 0% from last month")
+            diff = curr - prev
+            pct = round((diff / prev) * 100, 1)
+            arrow = "↑" if pct >= 0 else "↓"
+            return f"{arrow} {abs(pct)}% from last month"
+
+        total_change_percent = calc_pct_text(curr_month_total, prev_month_total, total_recruiters)
+        pending_change_percent = "0% from last month"
+        active_change_percent = calc_pct_text(
+            recruiter_qs.filter(status=User.Status.ACTIVE, created_at__gte=month_ago).count(),
+            recruiter_qs.filter(status=User.Status.ACTIVE, created_at__gte=two_months_ago, created_at__lt=month_ago).count(),
+            active_recruiters
+        )
+        suspended_change_percent = "0% from last month"
+
+        # Recent activities: strictly show HR recruiters created by this Admin
+        recent_activities = []
+        if user.role == User.Role.ADMIN:
+            admin_hrs = User.objects.filter(
+                role=User.Role.HR,
+                created_by=user
+            ).exclude(status=User.Status.DELETED).select_related('hr_profile').order_by('-created_at')[:8]
+        else:
+            admin_hrs = User.objects.filter(
+                role=User.Role.HR
+            ).exclude(status=User.Status.DELETED).select_related('hr_profile', 'created_by').order_by('-created_at')[:8]
+
+        for hr in admin_hrs:
+            diff_sec = max(0, int((now - hr.created_at).total_seconds()))
+            if diff_sec < 60:
+                time_ago = "Just now"
+            elif diff_sec < 3600:
+                time_ago = f"{diff_sec // 60} min ago"
+            elif diff_sec < 86400:
+                time_ago = f"{diff_sec // 3600} hrs ago"
+            else:
+                time_ago = hr.created_at.strftime("%b %d, %Y")
+
+            comp_name = getattr(hr, 'hr_profile', None) and hr.hr_profile.company_name
+            if not comp_name or comp_name == "N/A":
+                comp_name = "Company not specified"
+
+            disp_name = hr.get_full_name() or hr.username or hr.email
+            act_type = "Recruiter {name} created by Admin" if hr.status == User.Status.ACTIVE else "Recruiter {name} created (Pending Activation)"
+            recent_activities.append({
+                "id": hr.id,
+                "activity_type": act_type,
+                "employer_name": disp_name,
+                "company_name": comp_name,
+                "created_at": time_ago
+            })
+
+        notification_count = Notification.objects.filter(user=user, is_read=False).count()
+
+        return Response({
+            "recruiter_metrics": {
+                "total_recruiters": total_recruiters,
+                "pending_activations": pending_activations,
+                "active_recruiters": active_recruiters,
+                "suspended_recruiters": suspended_recruiters,
+                "total_change_percent": total_change_percent,
+                "pending_change_percent": pending_change_percent,
+                "active_change_percent": active_change_percent,
+                "suspended_change_percent": suspended_change_percent,
+            },
+            "recent_activity": recent_activities,
+            "notification_count": notification_count
+        }, status=status.HTTP_200_OK)
+
 
 
 

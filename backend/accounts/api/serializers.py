@@ -1351,6 +1351,7 @@ class CandidateUserSerializer(serializers.ModelSerializer):
     expected_salary_min = serializers.DecimalField(source='candidate_profile.expected_salary_min', max_digits=12, decimal_places=2, read_only=True)
     expected_salary_max = serializers.DecimalField(source='candidate_profile.expected_salary_max', max_digits=12, decimal_places=2, read_only=True)
     preferred_job_type = serializers.CharField(source='candidate_profile.preferred_job_type', read_only=True)
+    skills = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -1364,6 +1365,7 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             'full_name',
             'name',
             'location',
+            'skills',
             'gender',
             'date_of_birth',
             'profile_photo',
@@ -1409,15 +1411,38 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             city = cp.city or ''
             district = getattr(cp, 'district', '') or ''
             address = cp.address or ''
-            display_name = f"{city}, {state}".strip(', ') if (city or state) else (address if address else 'Tamil Nadu')
+            display_name = f"{city}, {state}".strip(', ') if (city or state) else address
+            if not display_name and not state and not city:
+                return None
             return {
-                'name': display_name,
+                'name': display_name or state or city,
                 'city': city,
                 'district': district,
-                'state': state or 'Tamil Nadu',
-                'full_path': display_name
+                'state': state,
+                'full_path': display_name or state or city
             }
-        return {'name': 'Tamil Nadu', 'state': 'Tamil Nadu', 'district': '', 'city': ''}
+        return None
+
+    def get_skills(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            # Check candidate_skills relation
+            if hasattr(cp, 'candidate_skills'):
+                names = [cs.skill.name for cs in cp.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill]
+                if names:
+                    return names
+            # Check extra_data
+            extra = cp.extra_data or {}
+            skills_list = []
+            if extra.get('skills') and isinstance(extra.get('skills'), list):
+                skills_list.extend(extra.get('skills'))
+            if extra.get('programmingLanguages') and isinstance(extra.get('programmingLanguages'), list):
+                skills_list.extend(extra.get('programmingLanguages'))
+            if extra.get('technologies') and isinstance(extra.get('technologies'), list):
+                skills_list.extend(extra.get('technologies'))
+            if skills_list:
+                return list(dict.fromkeys(skills_list))
+        return []
 
     def get_profile_completion(self, obj):
         # Calculated from the candidate's real profile data (never a stored default)

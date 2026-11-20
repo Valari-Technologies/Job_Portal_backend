@@ -79,6 +79,7 @@ from .views import (
     AdminDeleteCandidateView,
     AdminCandidateActionView,
     AdminGlobalSearchView,
+    AdminDashboardView,
 )
 
 urlpatterns = [
@@ -380,6 +381,7 @@ urlpatterns = [
     path('recruiter/interviews/', RecruiterInterviewListView.as_view(), name='recruiter_interviews_list'),
     path('recruiter/jobs/', RecruiterJobListView.as_view(), name='recruiter_jobs_list_create'),
     path('recruiter/dashboard/', RecruiterDashboardView.as_view(), name='recruiter_dashboard'),
+    path('admin/dashboard/', AdminDashboardView.as_view(), name='admin_dashboard'),
     path('recruiter/commerce-summary/', RecruiterCommerceSummaryView.as_view(), name='recruiter_commerce_summary'),
     path('recruiter/commerce/subscribe/', RecruiterPlanSubscriptionView.as_view(), name='recruiter_plan_subscribe'),
 ]

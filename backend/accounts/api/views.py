@@ -308,6 +308,104 @@ class AccountDeleteView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+class AdminSettingsView(APIView):
+    """
+    API endpoint to retrieve and update the authenticated Admin's live account settings,
+    operational preferences, and notification preferences.
+    """
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        if user.role not in [User.Role.ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({"detail": "Only Admins can access admin settings."}, status=status.HTTP_403_FORBIDDEN)
+
+        admin_profile, _ = AdminProfile.objects.get_or_create(
+            user=user,
+            defaults={"name": f"{user.first_name} {user.last_name}".strip() or user.username, "email": user.email}
+        )
+        extra_data = admin_profile.extra_data or {}
+        notif_prefs = extra_data.get('notification_preferences', {})
+
+        full_name = admin_profile.name or f"{user.first_name} {user.last_name}".strip() or user.username
+
+        data = {
+            "admin_id": user.id,
+            "username": user.username,
+            "full_name": full_name,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "phone_number": user.phone_number or "",
+            "role": user.role,
+            "status": user.status,
+            "last_login": user.last_login.strftime("%b %d, %Y, %I:%M %p") if user.last_login else "Active",
+            "date_joined": user.date_joined.strftime("%b %d, %Y") if user.date_joined else "Recent",
+            "general_settings": {
+                "assigned_district": extra_data.get('assigned_district', 'All Tamil Nadu'),
+                "department": extra_data.get('department', 'Labour & Employment Department'),
+                "default_page_size": extra_data.get('default_page_size', 6),
+            },
+            "notification_preferences": {
+                "in_app": notif_prefs.get('in_app', True),
+                "email": notif_prefs.get('email', True),
+                "recruiter_creation": notif_prefs.get('recruiter_creation', True),
+                "recruiter_status": notif_prefs.get('recruiter_status', True),
+                "job_moderation": notif_prefs.get('job_moderation', True),
+                "security_alerts": True,
+            },
+            "active_session": {
+                "device": request.META.get('HTTP_USER_AGENT', 'Current Web Browser'),
+                "ip_address": request.META.get('HTTP_X_FORWARDED_FOR') or request.META.get('REMOTE_ADDR') or '127.0.0.1',
+                "status": "Active Now",
+                "is_current": True
+            }
+        }
+        return Response(data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        user = request.user
+        if user.role not in [User.Role.ADMIN, User.Role.SUPER_ADMIN]:
+            return Response({"detail": "Only Admins can update admin settings."}, status=status.HTTP_403_FORBIDDEN)
+
+        admin_profile, _ = AdminProfile.objects.get_or_create(
+            user=user,
+            defaults={"name": f"{user.first_name} {user.last_name}".strip() or user.username, "email": user.email}
+        )
+        extra_data = admin_profile.extra_data or {}
+        req_data = request.data
+
+        user_updated = False
+        if 'full_name' in req_data:
+            full_name = str(req_data['full_name']).strip()
+            parts = full_name.split(' ', 1)
+            user.first_name = parts[0]
+            user.last_name = parts[1] if len(parts) > 1 else ''
+            admin_profile.name = full_name
+            user_updated = True
+
+        if 'phone_number' in req_data:
+            user.phone_number = str(req_data['phone_number']).strip()
+            user_updated = True
+
+        if user_updated:
+            user.save()
+
+        if 'general_settings' in req_data and isinstance(req_data['general_settings'], dict):
+            for k, v in req_data['general_settings'].items():
+                extra_data[k] = v
+
+        if 'notification_preferences' in req_data and isinstance(req_data['notification_preferences'], dict):
+            current_notifs = extra_data.get('notification_preferences', {})
+            current_notifs.update(req_data['notification_preferences'])
+            extra_data['notification_preferences'] = current_notifs
+
+        admin_profile.extra_data = extra_data
+        admin_profile.save()
+
+        return self.get(request)
+
+
 class CurrentUserMeView(APIView):
     """
     API endpoint to retrieve safe identity payload for current authenticated user.
@@ -547,7 +645,16 @@ class CandidateListView(generics.ListAPIView):
             role=User.Role.CANDIDATE
         ).exclude(
             status=User.Status.DELETED
-        ).select_related('candidate_profile', 'candidate_profile__location').order_by('-created_at', '-id')
+        ).select_related(
+            'candidate_profile',
+            'candidate_profile__location',
+            'candidate_profile__preferred_work_mode'
+        ).prefetch_related(
+            'candidate_profile__experiences',
+            'candidate_profile__educations',
+            'candidate_profile__resumes',
+            'candidate_profile__candidate_skills__skill'
+        ).order_by('-created_at', '-id')
 
         search = self.request.query_params.get('search', '').strip()
         if search:

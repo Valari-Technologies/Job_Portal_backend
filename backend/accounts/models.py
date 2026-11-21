@@ -337,6 +337,10 @@ class AdminProfile(models.Model):
         max_length=20,
         default=User.Status.ACTIVE
     )
+    extra_data = models.JSONField(
+        blank=True,
+        default=dict
+    )
     created_at = models.DateTimeField(
         auto_now_add=True
     )

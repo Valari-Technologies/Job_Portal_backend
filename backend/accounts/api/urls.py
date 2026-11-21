@@ -12,6 +12,7 @@ from .views import (
     UserProfileView,
     ChangePasswordView,
     AccountDeleteView,
+    AdminSettingsView,
     CurrentUserMeView,
     EmployerProfileView,
     PasswordResetRequestView,
@@ -144,6 +145,11 @@ urlpatterns = [
         'delete-account/',
         AccountDeleteView.as_view(),
         name='delete_account'
+    ),
+    path(
+        'admin/settings/',
+        AdminSettingsView.as_view(),
+        name='admin_settings'
     ),
     path(
         'password-reset/',

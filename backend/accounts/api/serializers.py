@@ -1341,6 +1341,7 @@ class LocationSerializer(serializers.ModelSerializer):
 class CandidateUserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
+    headline = serializers.SerializerMethodField()
     location = serializers.SerializerMethodField()
     gender = serializers.CharField(source='candidate_profile.gender', read_only=True)
     date_of_birth = serializers.CharField(source='candidate_profile.dob', read_only=True)
@@ -1350,8 +1351,15 @@ class CandidateUserSerializer(serializers.ModelSerializer):
     last_active = serializers.SerializerMethodField()
     expected_salary_min = serializers.DecimalField(source='candidate_profile.expected_salary_min', max_digits=12, decimal_places=2, read_only=True)
     expected_salary_max = serializers.DecimalField(source='candidate_profile.expected_salary_max', max_digits=12, decimal_places=2, read_only=True)
-    preferred_job_type = serializers.CharField(source='candidate_profile.preferred_job_type', read_only=True)
+    preferred_job_type = serializers.SerializerMethodField()
+    job_preference = serializers.SerializerMethodField()
     skills = serializers.SerializerMethodField()
+    experiences = serializers.SerializerMethodField()
+    educations = serializers.SerializerMethodField()
+    certifications = serializers.SerializerMethodField()
+    links = serializers.SerializerMethodField()
+    resumes = serializers.SerializerMethodField()
+    bio = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -1364,6 +1372,7 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             'status',
             'full_name',
             'name',
+            'headline',
             'location',
             'skills',
             'gender',
@@ -1375,6 +1384,13 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             'expected_salary_min',
             'expected_salary_max',
             'preferred_job_type',
+            'job_preference',
+            'experiences',
+            'educations',
+            'certifications',
+            'links',
+            'resumes',
+            'bio',
             'created_at',
             'updated_at',
         )
@@ -1387,6 +1403,36 @@ class CandidateUserSerializer(serializers.ModelSerializer):
 
     def get_name(self, obj):
         return self.get_full_name(obj)
+
+    def get_headline(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            extra = cp.extra_data or {}
+            headline = extra.get('headline') or cp.degree or getattr(cp, 'headline', '') or getattr(cp, 'designation', '')
+            if headline:
+                return str(headline).strip()
+        return ""
+
+    def get_job_preference(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            extra = cp.extra_data or {}
+            job_type = cp.preferred_job_type or extra.get('jobPreference') or extra.get('preferredJobType') or ''
+            work_mode = ""
+            if cp.preferred_work_mode:
+                work_mode = getattr(cp.preferred_work_mode, 'name', '')
+            if not work_mode:
+                work_mode = extra.get('preferredWorkMode') or ''
+            
+            parts = [p.strip() for p in [job_type, work_mode] if p and str(p).strip()]
+            if parts:
+                return " • ".join(parts)
+            if extra.get('expectedSalary'):
+                return f"Expected: {extra.get('expectedSalary')}"
+        return "Not specified"
+
+    def get_preferred_job_type(self, obj):
+        return self.get_job_preference(obj)
 
     def get_profile_photo(self, obj):
         request = self.context.get('request')
@@ -1443,6 +1489,110 @@ class CandidateUserSerializer(serializers.ModelSerializer):
             if skills_list:
                 return list(dict.fromkeys(skills_list))
         return []
+
+    def get_experiences(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            try:
+                db_experiences = list(cp.experiences.all().order_by('-start_date', '-id'))
+            except Exception:
+                db_experiences = []
+            formatted_experiences = []
+            for exp in db_experiences:
+                start_yr = exp.start_date.strftime('%b %Y') if exp.start_date else ''
+                end_yr = 'Present' if exp.is_current else (exp.end_date.strftime('%b %Y') if exp.end_date else '')
+                period_str = f"{start_yr} - {end_yr}".strip(' -')
+                formatted_experiences.append({
+                    "id": exp.id,
+                    "roleTitle": exp.designation or exp.job_title or "",
+                    "companyName": exp.company or exp.company_name or "",
+                    "period": period_str or "",
+                    "location": exp.experience_type or "",
+                    "description": exp.description or ""
+                })
+            if not formatted_experiences and 'experiences' in (cp.extra_data or {}):
+                formatted_experiences = (cp.extra_data or {}).get('experiences') or []
+            return formatted_experiences
+        return []
+
+    def get_educations(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            try:
+                db_educations = list(cp.educations.all().order_by('-graduation_year', '-id'))
+            except Exception:
+                db_educations = []
+            formatted_education = []
+            for edu in db_educations:
+                yr = edu.graduation_year or edu.year_completed or ''
+                formatted_education.append({
+                    "id": edu.id,
+                    "degree": edu.degree or "",
+                    "institution": edu.college or edu.institution or "",
+                    "period": f"{yr}" if yr else ""
+                })
+            if not formatted_education and 'education' in (cp.extra_data or {}):
+                formatted_education = (cp.extra_data or {}).get('education') or []
+            return formatted_education
+        return []
+
+    def get_certifications(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            certs = (cp.extra_data or {}).get('certifications') or []
+            formatted_certs = []
+            for c in certs:
+                if isinstance(c, dict):
+                    formatted_certs.append(c)
+                elif isinstance(c, str) and c.strip():
+                    formatted_certs.append({"name": c.strip()})
+            return formatted_certs
+        return []
+
+    def get_links(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            return (cp.extra_data or {}).get('links') or {
+                "github": "",
+                "linkedin": "",
+                "portfolio": "",
+                "expectedSalary": ""
+            }
+        return {"github": "", "linkedin": "", "portfolio": "", "expectedSalary": ""}
+
+    def get_resumes(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            request = self.context.get('request')
+            resume_list = []
+            try:
+                db_resumes = list(cp.resumes.all().order_by('-is_default', '-created_at'))
+            except Exception:
+                db_resumes = []
+            for r in db_resumes:
+                file_url = ''
+                if r.file_path:
+                    try:
+                        file_url = request.build_absolute_uri(r.file_path.url) if request else r.file_path.url
+                    except Exception:
+                        file_url = str(r.file_path)
+                elif r.file_url:
+                    file_url = r.file_url
+                resume_list.append({
+                    "id": r.id,
+                    "file_name": r.file_name or "Resume",
+                    "file_url": file_url,
+                    "is_default": r.is_default,
+                    "uploaded_at": r.uploaded_at.strftime("%b %d, %Y") if r.uploaded_at else ""
+                })
+            return resume_list
+        return []
+
+    def get_bio(self, obj):
+        if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
+            cp = obj.candidate_profile
+            return cp.address or (cp.extra_data or {}).get('summary') or ''
+        return ''
 
     def get_profile_completion(self, obj):
         # Calculated from the candidate's real profile data (never a stored default)

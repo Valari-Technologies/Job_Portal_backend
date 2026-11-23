@@ -879,6 +879,30 @@ class AdminUpdateEmployerDetailView(APIView):
     def put(self, request, user_id):
         return self.patch(request, user_id)
 
+    def delete(self, request, user_id):
+        try:
+            target_user = User.objects.get(pk=user_id, role=User.Role.HR)
+        except User.DoesNotExist:
+            return Response({"detail": "Employer account not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if target_user.status == User.Status.DELETED:
+            return Response({"detail": "Employer already deleted."}, status=status.HTTP_404_NOT_FOUND)
+
+        target_repr = f"{target_user.email} (HR/Employer)"
+        target_user.status = User.Status.DELETED
+        target_user.is_active = False
+        target_user.save()
+
+        log_audit_event(
+            actor=request.user,
+            action='USER_DELETED',
+            target_type='User',
+            target_id=str(target_user.id),
+            target_repr=target_repr,
+            description=f"Super Admin deleted employer user {target_user.email}"
+        )
+        return Response({"message": "Employer account deleted successfully."}, status=status.HTTP_200_OK)
+
 
 class LocationListView(generics.ListCreateAPIView):
     """

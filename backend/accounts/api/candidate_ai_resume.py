@@ -195,6 +195,42 @@ def tailor_pdf_bytes(pdf_bytes: bytes, replacements: list) -> bytes:
                         decomp = decomp.replace(full_bullet_match, new_full_bullet, 1)
                         logger.info("Tailored bullet %d at y=%s: %d line(s) at %spt (line_height=%s)", idx+1, text_y, len(lines), font_size, line_height)
                         break
+
+            # Check for Professional Summary replacement
+            for rep in replacements:
+                orig = rep.get('original_text', '').strip()
+                new_t = rep.get('new_text', '').strip()
+                if not orig or not new_t:
+                    continue
+                orig_clean = re.sub(r'[^a-zA-Z0-9]', '', orig).lower()
+                sec_type = rep.get('section_type', '') or rep.get('sectionType', '')
+                if sec_type == 'summary' or 'softwaredeveloperwithhandson' in orig_clean or 'professionalsummary' in orig_clean:
+                    sum_pattern = re.compile(
+                        r'(/Standard<</MCID\s*10>>BDC\s*q\s*0\s*0\s*0\s*rg\s*BT\s*([\d\.]+)\s+([\d\.]+)\s+Td\s+/F\d+\s+[\d\.]+\s+Tf.*?ET\s*Q\s*EMC\s*'
+                        r'/Standard<</MCID\s*11>>BDC\s*q\s*0\s*0\s*0\s*rg\s*BT\s*([\d\.]+)\s+([\d\.]+)\s+Td\s+/F\d+\s+[\d\.]+\s+Tf.*?ET\s*Q\s*EMC\s*'
+                        r'/Standard<</MCID\s*12>>BDC\s*q\s*0\s*0\s*0\s*rg\s*BT\s*([\d\.]+)\s+([\d\.]+)\s+Td\s+/F\d+\s+[\d\.]+\s+Tf.*?ET\s*Q\s*EMC)',
+                        re.DOTALL
+                    )
+                    sm_match = sum_pattern.search(decomp)
+                    if sm_match:
+                        full_sum_block = sm_match.group(0)
+                        sx = sm_match.group(2)
+                        sy1 = sm_match.group(3)
+                        sy2 = sm_match.group(5)
+                        sy3 = sm_match.group(7)
+                        words = new_t.split()
+                        w_per_l = max(1, len(words) // 3)
+                        l1 = ' '.join(words[:w_per_l])
+                        l2 = ' '.join(words[w_per_l:w_per_l*2])
+                        l3 = ' '.join(words[w_per_l*2:])
+                        new_sum_block = (
+                            f'/Standard<</MCID 10>>BDC\nq 0 0 0 rg\nBT\n{sx} {sy1} Td /FTailor 9.5 Tf ({esc(l1)}) Tj\nET\nQ\nEMC\n'
+                            f'/Standard<</MCID 11>>BDC\nq 0 0 0 rg\nBT\n{sx} {sy2} Td /FTailor 9.5 Tf ({esc(l2)}) Tj\nET\nQ\nEMC\n'
+                            f'/Standard<</MCID 12>>BDC\nq 0 0 0 rg\nBT\n{sx} {sy3} Td /FTailor 9.5 Tf ({esc(l3)}) Tj\nET\nQ\nEMC'
+                        )
+                        decomp = decomp.replace(full_sum_block, new_sum_block, 1)
+                        logger.info("Tailored Professional Summary in PDF")
+                        break
         else:
             # Fallback simple string replacement for plain text PDF streams
             for rep in replacements:

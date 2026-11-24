@@ -1361,7 +1361,7 @@ def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
             HRProfile.objects.get_or_create(user=instance)
         elif instance.role == User.Role.CANDIDATE:
             CandidateProfile.objects.get_or_create(user=instance)
-        elif instance.role == User.Role.ADMIN:
+        elif instance.role in (User.Role.ADMIN, User.Role.SUPER_ADMIN):
             AdminProfile.objects.get_or_create(
                 user=instance,
                 defaults={
@@ -1370,3 +1370,6 @@ def handle_user_post_save(sender, instance, created, raw=False, **kwargs):
                     "status": instance.status or User.Status.ACTIVE
                 }
             )
+            # Remove any candidate or HR profiles if the user is an Admin or Super Admin
+            CandidateProfile.objects.filter(user=instance).delete()
+            HRProfile.objects.filter(user=instance).delete()

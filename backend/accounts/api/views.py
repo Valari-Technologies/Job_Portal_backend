@@ -4235,8 +4235,16 @@ class AdminAnalyticsView(APIView):
             return q
 
         location_scoped = bool(loc_state or loc_district)
-        cand_base = CandidateProfile.objects.all()
-        hr_base = HRProfile.objects.all()
+        cand_base = CandidateProfile.objects.filter(
+            user__role=User.Role.CANDIDATE
+        ).exclude(
+            user__status=User.Status.DELETED
+        )
+        hr_base = HRProfile.objects.filter(
+            user__role__in=[User.Role.HR, 'RECRUITER', 'EMPLOYER']
+        ).exclude(
+            user__status=User.Status.DELETED
+        )
         jobs_base = Job.objects.all()
         if location_scoped:
             cand_text_q = Q(location__isnull=True)

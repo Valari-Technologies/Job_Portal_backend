@@ -34,7 +34,7 @@ def _parse_debug(val):
 
 DEBUG = config("DEBUG", default=True, cast=_parse_debug)
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1,.onrender.com', cast=lambda v: [s.strip() for s in v.split(',') if s.strip()])
 
 # Google Gemini LLM API Configuration for AI Copilot and Resume Optimizer
 GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
@@ -92,14 +92,9 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASE_URL = config("DATABASE_URL", default=None)
-
 if DATABASE_URL:
     DATABASES = {
-        'default': dj_database_url.config(
-            default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True
-        )
+        'default': dj_database_url.parse(DATABASE_URL)
     }
 else:
     DATABASES = {
@@ -154,6 +149,7 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 

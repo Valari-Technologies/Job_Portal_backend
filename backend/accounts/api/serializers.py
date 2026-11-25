@@ -1,4 +1,6 @@
 import re
+import base64
+from io import BytesIO
 
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
@@ -17,6 +19,114 @@ from ..models import (
 from ..services.audit_service import log_audit_event
 
 User = get_user_model()
+
+
+def encode_image_to_data_url(file_obj, max_size=(400, 400)):
+    """
+    Compresses an uploaded image file into a lightweight JPEG data URL
+    so avatars persist in PostgreSQL across ephemeral container restarts.
+    """
+    if not file_obj:
+        return None
+    try:
+        from PIL import Image
+        pos = file_obj.tell() if hasattr(file_obj, 'tell') else None
+        if hasattr(file_obj, 'seek'):
+            file_obj.seek(0)
+        img = Image.open(file_obj)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            bg.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = bg
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        img.thumbnail(max_size)
+        buf = BytesIO()
+        img.save(buf, format='JPEG', quality=82, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+        if pos is not None and hasattr(file_obj, 'seek'):
+            file_obj.seek(pos)
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception:
+        try:
+            if hasattr(file_obj, 'seek'):
+                file_obj.seek(0)
+            raw = file_obj.read()
+            if len(raw) <= 1024 * 1024:
+                content_type = getattr(file_obj, 'content_type', None) or 'image/jpeg'
+                return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
+        except Exception:
+            pass
+    return None
+
+
+def _normalize_photo_url(val, request=None):
+    if not val or not isinstance(val, str):
+        return None
+    val = val.strip()
+    if not val:
+        return None
+    if val.startswith('data:image/'):
+        return val
+    # Drop dead localhost URLs when running on a remote host
+    if request and ('127.0.0.1' in val or 'localhost' in val):
+        host = request.get_host() if hasattr(request, 'get_host') else ''
+        if host and '127.0.0.1' not in host and 'localhost' not in host:
+            return None
+    if val.startswith('http://') and '.onrender.com' in val:
+        val = 'https://' + val[len('http://'):]
+    if val.startswith('http://') or val.startswith('https://'):
+        return val
+    if request:
+        uri = request.build_absolute_uri(val)
+        if uri.startswith('http://') and '.onrender.com' in uri:
+            uri = 'https://' + uri[len('http://'):]
+        return uri
+    return val
+
+
+def resolve_user_photo(user, request=None):
+    """
+    Resolves the best persistent photo URL for any User (Candidate, HR, or Admin).
+    Prioritizes DB-backed data URLs over ephemeral disk files, while still
+    supporting valid files on disk and external HTTPS URLs.
+    """
+    if not user:
+        return None
+
+    # 1. Check DB-persisted data URL in role profile extra_data
+    for attr in ('candidate_profile', 'hr_profile', 'admin_profile'):
+        prof = getattr(user, attr, None)
+        if prof and isinstance(getattr(prof, 'extra_data', None), dict):
+            data_url = prof.extra_data.get('avatar_data_url')
+            if isinstance(data_url, str) and data_url.startswith('data:image/'):
+                return data_url
+
+    # 2. Check ImageField on User only if file actually exists in storage
+    pic = getattr(user, 'profile_picture', None)
+    if pic and getattr(pic, 'name', None):
+        try:
+            if pic.storage.exists(pic.name):
+                return _normalize_photo_url(pic.url, request)
+        except Exception:
+            pass
+
+    # 3. Check legacy/string photo fields on profiles
+    cp = getattr(user, 'candidate_profile', None)
+    if cp and getattr(cp, 'profile_photo', None):
+        resolved = _normalize_photo_url(cp.profile_photo, request)
+        if resolved:
+            return resolved
+
+    hr = getattr(user, 'hr_profile', None)
+    if hr and getattr(hr, 'company_logo', None):
+        resolved = _normalize_photo_url(hr.company_logo, request)
+        if resolved:
+            return resolved
+
+    return None
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -763,6 +873,7 @@ class AdminUserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     account_status = serializers.CharField(source='status')
     created_by = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -775,9 +886,13 @@ class AdminUserSerializer(serializers.ModelSerializer):
             'role',
             'status',
             'account_status',
+            'profile_photo',
             'created_at',
             'created_by'
         )
+
+    def get_profile_photo(self, obj):
+        return resolve_user_photo(obj, self.context.get('request'))
 
     def get_name(self, obj):
         full_name = f"{obj.first_name} {obj.last_name}".strip()
@@ -1435,18 +1550,7 @@ class CandidateUserSerializer(serializers.ModelSerializer):
         return self.get_job_preference(obj)
 
     def get_profile_photo(self, obj):
-        request = self.context.get('request')
-        if obj.profile_picture:
-            try:
-                return request.build_absolute_uri(obj.profile_picture.url) if request else obj.profile_picture.url
-            except Exception:
-                pass
-        if hasattr(obj, 'candidate_profile') and obj.candidate_profile and obj.candidate_profile.profile_photo:
-            photo = obj.candidate_profile.profile_photo
-            if photo.startswith('http') or not request:
-                return photo
-            return request.build_absolute_uri(photo)
-        return None
+        return resolve_user_photo(obj, self.context.get('request'))
 
     def get_location(self, obj):
         if hasattr(obj, 'candidate_profile') and obj.candidate_profile:
@@ -1623,7 +1727,7 @@ class EmployerUserSerializer(serializers.ModelSerializer):
     company_website = serializers.CharField(source='hr_profile.company_website', read_only=True)
     company_address = serializers.CharField(source='hr_profile.company_address', read_only=True)
     company_description = serializers.CharField(source='hr_profile.company_description', read_only=True)
-    company_logo = serializers.CharField(source='hr_profile.company_logo', read_only=True)
+    company_logo = serializers.SerializerMethodField()
     profile_photo = serializers.SerializerMethodField()
     designation = serializers.CharField(source='hr_profile.designation', read_only=True)
     verification_status = serializers.CharField(source='hr_profile.verification_status', read_only=True)
@@ -1657,13 +1761,11 @@ class EmployerUserSerializer(serializers.ModelSerializer):
             'updated_at',
         )
 
+    def get_company_logo(self, obj):
+        return resolve_user_photo(obj, self.context.get('request'))
+
     def get_profile_photo(self, obj):
-        hr = getattr(obj, 'hr_profile', None)
-        if hr and hr.company_logo:
-            return hr.company_logo
-        if obj.profile_picture:
-            return obj.profile_picture.url
-        return None
+        return resolve_user_photo(obj, self.context.get('request'))
 
     def get_full_name(self, obj):
         name = f"{obj.first_name} {obj.last_name}".strip()

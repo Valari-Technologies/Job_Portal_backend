@@ -29,6 +29,8 @@ from django.db.models import Q
 
 from .permissions import IsSuperAdminRole, IsAdminRole, IsHRRole, IsCandidateRole
 from .serializers import (
+    encode_image_to_data_url,
+    resolve_user_photo,
     CandidateRegisterSerializer,
     HRRegisterSerializer,
     AdminCreateUserSerializer,
@@ -427,6 +429,7 @@ class CurrentUserMeView(APIView):
             "role": user.role,
             "status": user.status,
             "phone_number": user.phone_number,
+            "profile_photo": resolve_user_photo(user, request),
         }
 
         if user.role == User.Role.HR:
@@ -441,7 +444,7 @@ class CurrentUserMeView(APIView):
                     "company_website": hr_profile.company_website or "",
                     "company_address": hr_profile.company_address or "",
                     "company_description": hr_profile.company_description or "",
-                    "company_logo": hr_profile.company_logo or "",
+                    "company_logo": resolve_user_photo(user, request) or hr_profile.company_logo or "",
                     "designation": hr_profile.designation or "",
                     "verification_status": hr_profile.verification_status or "PENDING",
                     "trust_level": hr_profile.trust_level or "NEW",
@@ -2558,12 +2561,7 @@ class CandidateProfileDetailView(APIView):
         saved_job_ids = list(SavedJob.objects.filter(candidate=candidate_profile).values_list('job_id', flat=True))
 
         full_name = candidate_profile.full_name or f"{user.first_name} {user.last_name}".strip() or user.username
-        if user.profile_picture:
-            avatar_url = request.build_absolute_uri(user.profile_picture.url)
-        elif candidate_profile.profile_photo:
-            avatar_url = candidate_profile.profile_photo if candidate_profile.profile_photo.startswith('http') else request.build_absolute_uri(candidate_profile.profile_photo)
-        else:
-            avatar_url = None
+        avatar_url = resolve_user_photo(user, request)
 
         # Actual skills for this candidate from DB or extra_data
         db_skill_names = [cs.skill.name for cs in candidate_profile.candidate_skills.all() if hasattr(cs, 'skill') and cs.skill]
@@ -2842,13 +2840,22 @@ class CandidateProfilePhotoUploadView(APIView):
             return Response({"detail": "No photo file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
 
         user = request.user
+        avatar_data_url = encode_image_to_data_url(file_obj)
+
         user.profile_picture = file_obj
         user.save()
 
-        avatar_url = request.build_absolute_uri(user.profile_picture.url) if user.profile_picture else None
+        disk_url = request.build_absolute_uri(user.profile_picture.url) if user.profile_picture else None
+        if disk_url and disk_url.startswith('http://') and '.onrender.com' in disk_url:
+            disk_url = 'https://' + disk_url[len('http://'):]
+        avatar_url = avatar_data_url or disk_url
 
         candidate_profile, _ = CandidateProfile.objects.get_or_create(user=user)
-        candidate_profile.profile_photo = avatar_url
+        candidate_profile.profile_photo = disk_url
+        extra = dict(candidate_profile.extra_data or {})
+        if avatar_data_url:
+            extra['avatar_data_url'] = avatar_data_url
+        candidate_profile.extra_data = extra
         candidate_profile.save()
 
         return Response({
@@ -2865,6 +2872,9 @@ class CandidateProfilePhotoUploadView(APIView):
 
         candidate_profile, _ = CandidateProfile.objects.get_or_create(user=user)
         candidate_profile.profile_photo = None
+        extra = dict(candidate_profile.extra_data or {})
+        extra.pop('avatar_data_url', None)
+        candidate_profile.extra_data = extra
         candidate_profile.save()
 
         return Response({"message": "Profile picture removed successfully.", "avatarUrl": None}, status=status.HTTP_200_OK)

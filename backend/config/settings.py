@@ -39,6 +39,9 @@ DEBUG = config("DEBUG", default=True, cast=_parse_debug)
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1,.onrender.com', cast=lambda v: [s.strip() for s in v.split(',') if s.strip()])
 
+# Trust Render / reverse-proxy HTTPS header so build_absolute_uri generates https:// URLs
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 # Google Gemini LLM API Configuration for AI Copilot and Resume Optimizer
 GEMINI_API_KEY = config('GEMINI_API_KEY', default='')
 

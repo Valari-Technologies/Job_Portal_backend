@@ -377,7 +377,10 @@ class HRProfileSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'website',
+            'linkedin_url',
+            'linkedin',
             'company_address',
             'company_description',
             'company_logo',
@@ -393,6 +396,7 @@ class HRProfileSerializer(serializers.ModelSerializer):
             'preferred_job_type',
             'preferred_work_mode_id',
             'company_website',
+            'linkedin_url',
             'company_address',
             'designation'
         )
@@ -591,6 +595,8 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
     company_phone = serializers.CharField(required=False, allow_blank=True)
     company_website = serializers.CharField(required=False, allow_blank=True)
     website = serializers.CharField(required=False, allow_blank=True)
+    linkedin_url = serializers.CharField(required=False, allow_blank=True)
+    linkedin = serializers.CharField(required=False, allow_blank=True)
     company_address = serializers.CharField(required=False, allow_blank=True)
     company_description = serializers.CharField(required=False, allow_blank=True)
     company_logo = serializers.CharField(required=False, allow_blank=True)
@@ -627,7 +633,10 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'website',
+            'linkedin_url',
+            'linkedin',
             'company_address',
             'company_description',
             'company_logo',
@@ -696,6 +705,7 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
         company_email = validated_data.pop('company_email', None)
         company_phone = validated_data.pop('company_phone', None)
         company_website = validated_data.pop('company_website', None) or validated_data.pop('website', None)
+        linkedin_url = validated_data.pop('linkedin_url', None) or validated_data.pop('linkedin', None)
         company_address = validated_data.pop('company_address', None)
         company_description = validated_data.pop('company_description', None)
         company_logo = validated_data.pop('company_logo', None)
@@ -816,8 +826,16 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
                 if company_description:
                     profile.company_description = company_description
                 logo_val = company_logo or profile_photo
+                extra = dict(profile.extra_data or {})
                 if logo_val:
-                    profile.company_logo = logo_val
+                    if isinstance(logo_val, str) and logo_val.startswith('data:image/'):
+                        extra['avatar_data_url'] = logo_val
+                    else:
+                        profile.company_logo = logo_val
+                if linkedin_url:
+                    extra['linkedin_url'] = linkedin_url.strip()
+                if extra:
+                    profile.extra_data = extra
                 if location_id:
                     profile.location_id = location_id
                 if designation:
@@ -929,6 +947,8 @@ class HRRegisterSerializer(serializers.ModelSerializer):
     company_phone = serializers.CharField(required=False, allow_blank=True)
     company_website = serializers.CharField(required=False, allow_blank=True)
     website = serializers.CharField(required=False, allow_blank=True)
+    linkedin_url = serializers.CharField(required=False, allow_blank=True)
+    linkedin = serializers.CharField(required=False, allow_blank=True)
     company_address = serializers.CharField(required=False, allow_blank=True)
     company_description = serializers.CharField(required=False, allow_blank=True)
     company_logo = serializers.CharField(required=False, allow_blank=True)
@@ -958,7 +978,10 @@ class HRRegisterSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'website',
+            'linkedin_url',
+            'linkedin',
             'company_address',
             'company_description',
             'company_logo',
@@ -974,6 +997,7 @@ class HRRegisterSerializer(serializers.ModelSerializer):
             'preferred_job_type',
             'preferred_work_mode_id',
             'company_website',
+            'linkedin_url',
             'company_address',
             'designation'
         )
@@ -983,6 +1007,7 @@ class HRRegisterSerializer(serializers.ModelSerializer):
         company_email = validated_data.pop('company_email', None)
         company_phone = validated_data.pop('company_phone', None)
         company_website = validated_data.pop('company_website', None) or validated_data.pop('website', None)
+        linkedin_url = validated_data.pop('linkedin_url', None) or validated_data.pop('linkedin', None)
         company_address = validated_data.pop('company_address', None)
         company_description = validated_data.pop('company_description', None)
         company_logo = validated_data.pop('company_logo', None)
@@ -1371,6 +1396,7 @@ class EmployerProfileSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'company_address',
             'company_description',
             'company_logo',
@@ -1725,6 +1751,7 @@ class EmployerUserSerializer(serializers.ModelSerializer):
     company_email = serializers.CharField(source='hr_profile.company_email', read_only=True)
     company_phone = serializers.CharField(source='hr_profile.company_phone', read_only=True)
     company_website = serializers.CharField(source='hr_profile.company_website', read_only=True)
+    linkedin_url = serializers.SerializerMethodField()
     company_address = serializers.CharField(source='hr_profile.company_address', read_only=True)
     company_description = serializers.CharField(source='hr_profile.company_description', read_only=True)
     company_logo = serializers.SerializerMethodField()
@@ -1749,6 +1776,7 @@ class EmployerUserSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'company_address',
             'company_description',
             'company_logo',
@@ -1763,6 +1791,12 @@ class EmployerUserSerializer(serializers.ModelSerializer):
 
     def get_company_logo(self, obj):
         return resolve_user_photo(obj, self.context.get('request'))
+
+    def get_linkedin_url(self, obj):
+        hr = getattr(obj, 'hr_profile', None)
+        if hr and isinstance(getattr(hr, 'extra_data', None), dict):
+            return hr.extra_data.get('linkedin_url') or ''
+        return ''
 
     def get_profile_photo(self, obj):
         return resolve_user_photo(obj, self.context.get('request'))
@@ -1896,6 +1930,7 @@ class EmployerVerificationQueueSerializer(serializers.ModelSerializer):
             'phone',
             'company_phone',
             'company_website',
+            'linkedin_url',
             'company_address',
             'company_description',
             'company_logo',

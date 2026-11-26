@@ -445,6 +445,7 @@ class CurrentUserMeView(APIView):
                     "company_address": hr_profile.company_address or "",
                     "company_description": hr_profile.company_description or "",
                     "company_logo": resolve_user_photo(user, request) or hr_profile.company_logo or "",
+                    "linkedin_url": (hr_profile.extra_data or {}).get("linkedin_url", ""),
                     "designation": hr_profile.designation or "",
                     "verification_status": hr_profile.verification_status or "PENDING",
                     "trust_level": hr_profile.trust_level or "NEW",
@@ -916,7 +917,7 @@ class LocationListView(generics.ListCreateAPIView):
 
     def get_permissions(self):
         if self.request.method == 'POST':
-            return [permissions.IsAuthenticated(), IsSuperAdminRole()]
+            return [permissions.IsAuthenticated(), IsAdminRole()]
         return [permissions.AllowAny()]
 
     def get_queryset(self):

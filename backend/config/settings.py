@@ -60,9 +60,15 @@ INSTALLED_APPS = [
     'accounts',
 ]
 
+import importlib.util
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
+    *(
+        ['whitenoise.middleware.WhiteNoiseMiddleware']
+        if importlib.util.find_spec('whitenoise') is not None
+        else []
+    ),
     # CorsMiddleware must run before CommonMiddleware so that CORS headers are
     # attached to preflight (OPTIONS) and short-circuited 4xx responses too.
     'corsheaders.middleware.CorsMiddleware',

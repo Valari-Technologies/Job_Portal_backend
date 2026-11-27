@@ -377,10 +377,7 @@ class HRProfileSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
-            'linkedin_url',
             'website',
-            'linkedin_url',
-            'linkedin',
             'company_address',
             'company_description',
             'company_logo',
@@ -396,7 +393,6 @@ class HRProfileSerializer(serializers.ModelSerializer):
             'preferred_job_type',
             'preferred_work_mode_id',
             'company_website',
-            'linkedin_url',
             'company_address',
             'designation'
         )
@@ -633,7 +629,6 @@ class AdminCreateUserSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
-            'linkedin_url',
             'website',
             'linkedin_url',
             'linkedin',
@@ -978,7 +973,6 @@ class HRRegisterSerializer(serializers.ModelSerializer):
             'company_email',
             'company_phone',
             'company_website',
-            'linkedin_url',
             'website',
             'linkedin_url',
             'linkedin',
@@ -997,7 +991,6 @@ class HRRegisterSerializer(serializers.ModelSerializer):
             'preferred_job_type',
             'preferred_work_mode_id',
             'company_website',
-            'linkedin_url',
             'company_address',
             'designation'
         )
@@ -1381,6 +1374,7 @@ class EmployerProfileSerializer(serializers.ModelSerializer):
     role = serializers.CharField(source='user.role', read_only=True)
     status = serializers.CharField(source='user.status', read_only=True)
     phone_number = serializers.CharField(source='user.phone_number', read_only=True)
+    linkedin_url = serializers.SerializerMethodField()
 
     class Meta:
         model = HRProfile
@@ -1411,6 +1405,11 @@ class EmployerProfileSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+
+    def get_linkedin_url(self, obj):
+        if isinstance(getattr(obj, 'extra_data', None), dict):
+            return obj.extra_data.get('linkedin_url') or ''
+        return ''
 
 
 class PasswordResetRequestSerializer(serializers.Serializer):
@@ -1918,6 +1917,8 @@ class EmployerVerificationQueueSerializer(serializers.ModelSerializer):
     trust_info = serializers.SerializerMethodField()
     latest_verification = serializers.SerializerMethodField()
     verification_history = serializers.SerializerMethodField()
+    company_logo = serializers.SerializerMethodField()
+    linkedin_url = serializers.SerializerMethodField()
 
     class Meta:
         model = HRProfile
@@ -1952,6 +1953,14 @@ class EmployerVerificationQueueSerializer(serializers.ModelSerializer):
 
     def get_phone(self, obj):
         return obj.company_phone or obj.phone or obj.user.phone_number
+
+    def get_company_logo(self, obj):
+        return resolve_user_photo(getattr(obj, 'user', None), self.context.get('request'))
+
+    def get_linkedin_url(self, obj):
+        if isinstance(getattr(obj, 'extra_data', None), dict):
+            return obj.extra_data.get('linkedin_url') or ''
+        return ''
 
     def get_is_profile_complete(self, obj):
         return obj.is_profile_complete()

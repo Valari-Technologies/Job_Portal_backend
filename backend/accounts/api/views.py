@@ -4867,11 +4867,67 @@ class RecruiterDashboardView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+def _compute_recruiter_commerce_state(hr):
+    """
+    Computes live plan status, credits, and expiration for an HRProfile.
+    New/approved HRs start with no active plan (None) and 0 credits until
+    they explicitly choose a suitable plan.
+    """
+    extra = hr.extra_data or {}
+    commerce = extra.get('commerce') or {}
+    jobs_qs = Job.objects.filter(hr=hr)
+    jobs_posted_count = jobs_qs.count()
+
+    plan_data = commerce.get('plan')
+    if not plan_data:
+        return {
+            "commerce": commerce,
+            "jobs_qs": jobs_qs,
+            "jobs_posted_count": jobs_posted_count,
+            "plan_data": None,
+            "total_allowance": 0,
+            "used_credits": 0,
+            "available_credits": 0,
+            "is_expired": False,
+        }
+
+    plan_allowance = int(commerce.get('allowance', 0))
+    additional_purchased = int(commerce.get('purchased_credits', 0))
+    total_allowance = plan_allowance + additional_purchased
+    baseline_jobs = int(commerce.get('plan_start_jobs_count', 0))
+    used_credits = max(0, jobs_posted_count - baseline_jobs)
+    available_credits = max(0, total_allowance - used_credits)
+
+    is_expired = False
+    valid_until_iso = plan_data.get('valid_until_iso')
+    if valid_until_iso:
+        try:
+            from datetime import datetime
+            exp_dt = datetime.fromisoformat(valid_until_iso)
+            if timezone.is_naive(exp_dt):
+                exp_dt = timezone.make_aware(exp_dt, timezone.get_current_timezone())
+            if timezone.now() > exp_dt:
+                is_expired = True
+        except Exception:
+            pass
+
+    return {
+        "commerce": commerce,
+        "jobs_qs": jobs_qs,
+        "jobs_posted_count": jobs_posted_count,
+        "plan_data": plan_data,
+        "total_allowance": total_allowance,
+        "used_credits": used_credits,
+        "available_credits": available_credits,
+        "is_expired": is_expired,
+    }
+
+
 class RecruiterCommerceSummaryView(APIView):
     """
     Returns live commerce summary for the authenticated Recruiter/HR:
     - Available job posting credits
-    - Active plan details (name, price, validity date, features, allowance)
+    - Active plan details (None until HR selects a plan)
     - Plan usage (allowance, used jobs, remaining credits)
     - Billing information & payment methods
     - Transaction history with verified invoice records
@@ -4884,61 +4940,17 @@ class RecruiterCommerceSummaryView(APIView):
             return Response({"detail": "HR Profile required"}, status=status.HTTP_403_FORBIDDEN)
 
         hr = user.hr_profile
-        extra = hr.extra_data or {}
-        commerce = extra.get('commerce') or {}
+        state = _compute_recruiter_commerce_state(hr)
+        commerce = state["commerce"]
+        jobs_qs = state["jobs_qs"]
+        plan_data = state["plan_data"]
+        total_allowance = state["total_allowance"]
+        used_credits = state["used_credits"]
+        available_credits = state["available_credits"]
 
-        # 1. Total jobs posted by this recruiter
-        jobs_qs = Job.objects.filter(hr=hr)
-        jobs_posted_count = jobs_qs.count()
-
-        # 2. Plan details (live active plan)
-        plan_data = commerce.get('plan')
-        if not plan_data:
-            # PRD: Every approved employer starts with an active posting entitlement
-            valid_until_dt = (hr.created_at or timezone.now()) + timedelta(days=90)
-            plan_data = {
-                "id": "basic",
-                "name": "Free Starter Plan",
-                "price": 0,
-                "formatted_price": "Free",
-                "duration_days": 30,
-                "valid_until": valid_until_dt.strftime("%b %d, %Y"),
-                "is_free": True,
-                "features": [
-                    "10 Job Credits included",
-                    "7 days listing per job",
-                    "Standard search visibility",
-                    "Candidate Profile & Resume access"
-                ]
-            }
-
-        # 3. Available credits & usage
-        plan_allowance = int(commerce.get('allowance', 10))
-        additional_purchased = int(commerce.get('purchased_credits', 0))
-        total_allowance = plan_allowance + additional_purchased
-        used_credits = jobs_posted_count
-        available_credits = max(0, total_allowance - used_credits)
-
-        # 4. Transactions list
         transactions = commerce.get('transactions', [])
-        if not transactions:
-            created_str = hr.created_at.strftime("%b %d, %Y") if hr.created_at else timezone.now().strftime("%b %d, %Y")
-            transactions = [
-                {
-                    "id": f"TXN_{hr.id}001",
-                    "date": created_str,
-                    "description": "Free Starter Plan - 10 Credits Activation",
-                    "amount": 0,
-                    "formatted_amount": "₹0.00",
-                    "status": "SUCCESS",
-                    "invoice_url": None
-                }
-            ]
-
-        # 5. Last payment method
         last_method = commerce.get('last_payment_method')
 
-        # 6. Usage jobs list
         usage_jobs = []
         for j in jobs_qs.order_by('-created_at')[:10]:
             usage_jobs.append({
@@ -4975,8 +4987,9 @@ class RecruiterCommerceSummaryView(APIView):
 
 class RecruiterPlanSubscriptionView(APIView):
     """
-    Subscribe / upgrade posting plan or purchase credits for the authenticated Recruiter/HR.
-    Updates entitlements, logs transaction, and updates active plan.
+    Subscribe to a posting plan for the authenticated Recruiter/HR.
+    Enforces finishing the current active plan (0 credits remaining or expired)
+    before purchasing/activating a new plan.
     """
     permission_classes = (permissions.IsAuthenticated,)
 
@@ -4986,8 +4999,25 @@ class RecruiterPlanSubscriptionView(APIView):
             return Response({"detail": "HR Profile required"}, status=status.HTTP_403_FORBIDDEN)
 
         hr = user.hr_profile
-        extra = hr.extra_data or {}
-        commerce = extra.get('commerce') or {}
+        state = _compute_recruiter_commerce_state(hr)
+        existing_plan = state["plan_data"]
+        remaining_credits = state["available_credits"]
+        is_expired = state["is_expired"]
+
+        if existing_plan and remaining_credits > 0 and not is_expired:
+            return Response(
+                {
+                    "detail": (
+                        f"Your {existing_plan.get('name', 'current plan')} is still active with "
+                        f"{remaining_credits} credit(s) remaining (valid until {existing_plan.get('valid_until', 'N/A')}). "
+                        "You can purchase a new plan after finishing your current plan."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        extra = dict(hr.extra_data or {})
+        commerce = dict(state["commerce"] or {})
 
         plan_id = str(request.data.get('plan_id', 'basic')).lower()
         payment_method = str(request.data.get('payment_method', 'CARD')).upper()
@@ -5027,7 +5057,10 @@ class RecruiterPlanSubscriptionView(APIView):
             }
         }
 
-        selected_plan = PLANS_CATALOG.get(plan_id, PLANS_CATALOG['basic'])
+        if plan_id not in PLANS_CATALOG:
+            return Response({"detail": "Invalid plan selected."}, status=status.HTTP_400_BAD_REQUEST)
+
+        selected_plan = PLANS_CATALOG[plan_id]
         valid_until_dt = now + timedelta(days=selected_plan['duration_days'])
 
         updated_plan_data = {
@@ -5037,15 +5070,14 @@ class RecruiterPlanSubscriptionView(APIView):
             "formatted_price": selected_plan['formatted_price'],
             "duration_days": selected_plan['duration_days'],
             "valid_until": valid_until_dt.strftime("%b %d, %Y"),
+            "valid_until_iso": valid_until_dt.isoformat(),
             "is_free": selected_plan['is_free'],
             "features": selected_plan['features']
         }
 
-        # Calculate credits addition
-        current_purchased = int(commerce.get('purchased_credits', 0))
-        new_credits_to_add = selected_plan['credits']
         commerce['allowance'] = selected_plan['credits']
-        commerce['purchased_credits'] = current_purchased + new_credits_to_add
+        commerce['purchased_credits'] = 0
+        commerce['plan_start_jobs_count'] = state["jobs_posted_count"]
         commerce['plan'] = updated_plan_data
 
         if not selected_plan['is_free']:

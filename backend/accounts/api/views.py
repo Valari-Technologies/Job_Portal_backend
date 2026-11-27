@@ -1671,6 +1671,10 @@ class EmployerJobSubmitView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
+        credit_err, credit_state = _validate_recruiter_posting_credits(hr_profile)
+        if credit_err is not None:
+            return credit_err
+
         try:
             job = Job.objects.get(pk=job_id, hr=hr_profile)
         except Job.DoesNotExist:
@@ -4011,6 +4015,10 @@ class RecruiterJobListView(APIView):
             return Response({"detail": "HR profile required"}, status=status.HTTP_403_FORBIDDEN)
 
         hr_profile = user.hr_profile
+        credit_err, credit_state = _validate_recruiter_posting_credits(hr_profile)
+        if credit_err is not None:
+            return credit_err
+
         data = request.data or {}
 
         title = data.get('title', '').strip() or 'Software Developer'
@@ -4875,7 +4883,7 @@ def _compute_recruiter_commerce_state(hr):
     """
     extra = hr.extra_data or {}
     commerce = extra.get('commerce') or {}
-    jobs_qs = Job.objects.filter(hr=hr)
+    jobs_qs = Job.objects.filter(hr=hr).exclude(status=Job.Status.DRAFT)
     jobs_posted_count = jobs_qs.count()
 
     plan_data = commerce.get('plan')
@@ -4921,6 +4929,48 @@ def _compute_recruiter_commerce_state(hr):
         "available_credits": available_credits,
         "is_expired": is_expired,
     }
+
+
+def _validate_recruiter_posting_credits(hr_profile):
+    """
+    Validates that the HR has an active, non-expired plan with at least 1 credit
+    before allowing job creation or submission.
+    """
+    state = _compute_recruiter_commerce_state(hr_profile)
+    if not state["plan_data"]:
+        return (
+            Response(
+                {
+                    "detail": "No active posting plan found. Please choose a suitable plan before posting a job.",
+                    "code": "NO_ACTIVE_PLAN",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+            state,
+        )
+    if state["is_expired"]:
+        return (
+            Response(
+                {
+                    "detail": "Your posting plan has expired. Please choose a new plan to continue posting.",
+                    "code": "PLAN_EXPIRED",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+            state,
+        )
+    if state["available_credits"] <= 0:
+        return (
+            Response(
+                {
+                    "detail": "You have 0 job posting credits remaining. Please select a new plan to continue posting.",
+                    "code": "NO_CREDITS",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            ),
+            state,
+        )
+    return None, state
 
 
 class RecruiterCommerceSummaryView(APIView):
